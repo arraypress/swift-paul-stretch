@@ -120,6 +120,16 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     /// a wider cloud.
     public var grainPositionJitter: Double = 0.05
 
+    /// Random offset of each grain's start time, `0…1` (as a fraction of
+    /// half the grain spacing).
+    ///
+    /// At `0` grains fire on a perfectly regular grid — audible as a buzzy
+    /// re-trigger tone whenever the scrub lingers on one moment (extreme
+    /// stretches of short sources). The default breaks the grid into an
+    /// organic rain of grains; set `0` deliberately for rhythmic,
+    /// pulse-like clouds at low densities.
+    public var grainTimeJitter: Double = 0.75
+
     /// Random per-grain pitch, in ± semitones. `12` scatters grains across
     /// a full octave; ``pitchSemitones`` shifts the whole cloud.
     public var grainPitchSpread: Double = 0
@@ -153,7 +163,7 @@ public struct StretchParameters: Sendable, Codable, Equatable {
         case mode, targetSeconds, maxStretch, layering, windowSeconds,
              phaseRandomness, pitchSemitones, onsetSensitivity, tapeSpeed,
              reverse, stereoWidth, freezePosition, freezeSmear, freezeScan,
-             grainSeconds, grainDensity, grainPositionJitter,
+             grainSeconds, grainDensity, grainPositionJitter, grainTimeJitter,
              grainPitchSpread, grainPanSpread,
              seamlessLoop, fadeInSeconds, fadeOutSeconds
     }
@@ -180,6 +190,7 @@ public struct StretchParameters: Sendable, Codable, Equatable {
         grainSeconds = try c.decodeIfPresent(Double.self, forKey: .grainSeconds) ?? grainSeconds
         grainDensity = try c.decodeIfPresent(Double.self, forKey: .grainDensity) ?? grainDensity
         grainPositionJitter = try c.decodeIfPresent(Double.self, forKey: .grainPositionJitter) ?? grainPositionJitter
+        grainTimeJitter = try c.decodeIfPresent(Double.self, forKey: .grainTimeJitter) ?? grainTimeJitter
         grainPitchSpread = try c.decodeIfPresent(Double.self, forKey: .grainPitchSpread) ?? grainPitchSpread
         grainPanSpread = try c.decodeIfPresent(Double.self, forKey: .grainPanSpread) ?? grainPanSpread
         seamlessLoop = try c.decodeIfPresent(Bool.self, forKey: .seamlessLoop) ?? seamlessLoop

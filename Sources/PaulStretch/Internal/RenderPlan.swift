@@ -101,6 +101,7 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                                     grainSeconds: p.grainSeconds,
                                     density: p.grainDensity,
                                     positionJitter: p.grainPositionJitter,
+                                    timeJitter: p.grainTimeJitter,
                                     pitchSpread: p.grainPitchSpread,
                                     basePitch: p.pitchSemitones,
                                     panSpread: p.grainPanSpread,

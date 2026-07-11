@@ -93,11 +93,13 @@ public enum StretchRenderer {
             var outL = [Float](repeating: 0, count: totalFrames)
             var outR = [Float](repeating: 0, count: totalFrames)
             if totalFrames > 0 {
+                let counter = BlockProgress(total: kernel.totalGrains, callback: progress)
                 outL.withUnsafeMutableBufferPointer { lp in
                     outR.withUnsafeMutableBufferPointer { rp in
                         kernel.renderRangeParallel(0, totalFrames,
                                                    outL: lp.baseAddress!, outR: rp.baseAddress!,
-                                                   isCancelled: isCancelled, onGrainsDone: nil)
+                                                   isCancelled: isCancelled,
+                                                   onGrainsDone: { counter.add($0) })
                     }
                 }
             }
@@ -115,10 +117,21 @@ public enum StretchRenderer {
             var outR = [Float](repeating: 0, count: totalFrames)
             var ok = true
             if totalFrames > 0 {
+                // Sequential stream — render in slices so progress moves.
                 outL.withUnsafeMutableBufferPointer { lp in
                     outR.withUnsafeMutableBufferPointer { rp in
-                        ok = stream.render(into: lp.baseAddress!, rp.baseAddress!,
-                                           count: totalFrames, isCancelled: isCancelled)
+                        let slice = 1 << 18
+                        var pos = 0
+                        while pos < totalFrames {
+                            let n = min(slice, totalFrames - pos)
+                            guard stream.render(into: lp.baseAddress! + pos, rp.baseAddress! + pos,
+                                                count: n, isCancelled: isCancelled) else {
+                                ok = false
+                                return
+                            }
+                            pos += n
+                            progress?(Double(pos) / Double(totalFrames))
+                        }
                     }
                 }
             }

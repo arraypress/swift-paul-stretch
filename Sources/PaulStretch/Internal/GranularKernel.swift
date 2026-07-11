@@ -37,6 +37,14 @@ struct GranularKernel {
     let basePitch: Double
     /// Random per-grain stereo position, `0…1`.
     let panSpread: Double
+    /// Random per-grain onset offset, in ± frames.
+    ///
+    /// Without this, grains fire on a perfectly rigid grid
+    /// (`spacing` apart). When the scrub lingers — a long target from a
+    /// short source — near-identical content re-triggered at an exact
+    /// `sampleRate/spacing` Hz rate reads as a buzzy, glitchy machine-gun.
+    /// Jittering each onset breaks the grid into an organic rain of grains.
+    let onsetJitterFrames: Int
     let seed: UInt64
     /// Hann envelope, one grain long.
     let envelope: [Float]
@@ -49,6 +57,7 @@ struct GranularKernel {
          grainSeconds: Double,
          density: Double,
          positionJitter: Double,
+         timeJitter: Double,
          pitchSpread: Double,
          basePitch: Double,
          panSpread: Double,
@@ -62,6 +71,7 @@ struct GranularKernel {
         self.grainFrames = max(64, Int(max(0.005, grainSeconds) * sr))
         self.spacing = Double(grainFrames) / max(1, density)
         self.jitterFrames = min(max(positionJitter, 0), 1) * Double(input.frameCount)
+        self.onsetJitterFrames = Int(min(max(timeJitter, 0), 1) * spacing * 0.5)
         self.pitchSpread = max(0, pitchSpread)
         self.basePitch = basePitch
         self.panSpread = min(max(panSpread, 0), 1)
@@ -95,16 +105,19 @@ struct GranularKernel {
             let srcR = rp.baseAddress!
             let env = ep.baseAddress!
 
-            var g = max(0, Int((Double(rangeStart) - Double(grainFrames)) / spacing))
+            var g = max(0, Int((Double(rangeStart) - Double(grainFrames) - Double(onsetJitterFrames)) / spacing))
             var localDone = 0
             while true {
-                let onset = Int(Double(g) * spacing)
-                if onset >= rangeEnd || onset >= outputLength { break }
+                let gridOnset = Int(Double(g) * spacing)
+                if gridOnset - onsetJitterFrames >= rangeEnd || gridOnset >= outputLength { break }
                 if (g & 255) == 0 && isCancelled() { return }
 
-                if onset + grainFrames > rangeStart {
-                    // Per-grain randomness — fixed draw order: jitter, pitch, pan.
-                    var rng = FastRNG(seed: blockSeed(seed, g))
+                // Per-grain randomness — fixed draw order: time, position,
+                // pitch, pan. The onset offset is drawn unconditionally so a
+                // grain's identity never depends on which range asked for it.
+                var rng = FastRNG(seed: blockSeed(seed, g))
+                let onset = gridOnset + Int((rng.unit() * 2 - 1) * Double(onsetJitterFrames))
+                if onset < rangeEnd && onset + grainFrames > rangeStart && onset < outputLength {
                     let jitter = (rng.unit() * 2 - 1) * jitterFrames
                     let pitch = basePitch + (rng.unit() * 2 - 1) * pitchSpread
                     let pan = 0.5 + (rng.unit() * 2 - 1) * panSpread * 0.5

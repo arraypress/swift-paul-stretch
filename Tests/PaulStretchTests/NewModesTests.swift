@@ -219,6 +219,7 @@ final class NewModesTests: XCTestCase {
             ("pv-pitch", params { $0.mode = .phaseVocoder; $0.windowSeconds = 0.08; $0.pitchSemitones = 7 }),
             ("granular", params { $0.mode = .granularCloud; $0.grainPitchSpread = 5 }),
             ("granular-loop", params { $0.mode = .granularCloud; $0.seamlessLoop = true }),
+            ("granular-grid", params { $0.mode = .granularCloud; $0.grainTimeJitter = 0 }),
         ]
         for (name, p) in matrix {
             let full = StretchRenderer.render(source, parameters: p, isCancelled: { false })
