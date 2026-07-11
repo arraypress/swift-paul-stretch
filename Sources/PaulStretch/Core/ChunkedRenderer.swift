@@ -210,7 +210,15 @@ final class ChunkedRun {
     /// or an all-silent stretch).
     var stretchGains: [Float?] = []
     var freezeGain: Float?
+    var granularGain: Float?
+    var pvGain: Float?
     var mixGain: Float?
+
+    /// Sequential phase-vocoder streams for the delivery pass: one walking
+    /// the main timeline, one walking the loop-tail region. Reset by
+    /// ``prepareDelivery(chunkFrames:)`` and ``rewindDelivery()``.
+    private var pvMain: PVStream?
+    private var pvTail: PVStream?
 
     /// Sweep granularity for the peak passes (~12 s at 44.1 kHz).
     let sweepFrames = 1 << 19
@@ -233,6 +241,8 @@ final class ChunkedRun {
             stretchGains = [Float?](repeating: nil, count: layers.count)
         case .freeze(let kernel):
             total += Double(kernel.outputLength)
+        case .granular, .phaseVocoder:
+            total += Double(plan.preLoopFrames)
         case .empty:
             break
         }
@@ -278,6 +288,63 @@ final class ChunkedRun {
             }
             if isCancelled() { return false }
             freezeGain = peak > 0 ? 0.92 / peak : nil
+            return true
+
+        case .granular(let kernel):
+            var peak: Float = 0
+            var scratchL = [Float](repeating: 0, count: sweepFrames)
+            var scratchR = [Float](repeating: 0, count: sweepFrames)
+            var s = 0
+            while s < plan.preLoopFrames {
+                if isCancelled() { return false }
+                let e = min(plan.preLoopFrames, s + sweepFrames)
+                let n = e - s
+                scratchL.withUnsafeMutableBufferPointer { lp in
+                    scratchR.withUnsafeMutableBufferPointer { rp in
+                        vDSP_vclr(lp.baseAddress!, 1, vDSP_Length(n))
+                        vDSP_vclr(rp.baseAddress!, 1, vDSP_Length(n))
+                        kernel.renderRangeParallel(s, e, outL: lp.baseAddress!, outR: rp.baseAddress!,
+                                                   isCancelled: isCancelled, onGrainsDone: nil)
+                        var pL: Float = 0, pR: Float = 0
+                        vDSP_maxmgv(lp.baseAddress!, 1, &pL, vDSP_Length(n))
+                        vDSP_maxmgv(rp.baseAddress!, 1, &pR, vDSP_Length(n))
+                        peak = max(peak, max(pL, pR))
+                    }
+                }
+                addUnits(n)
+                s = e
+            }
+            if isCancelled() { return false }
+            granularGain = peak > 0 ? 0.92 / peak : nil
+            return true
+
+        case .phaseVocoder(let spec):
+            guard let stream = spec.makeStream() else { return true }
+            var peak: Float = 0
+            var scratchL = [Float](repeating: 0, count: sweepFrames)
+            var scratchR = [Float](repeating: 0, count: sweepFrames)
+            var s = 0
+            while s < plan.preLoopFrames {
+                if isCancelled() { return false }
+                let e = min(plan.preLoopFrames, s + sweepFrames)
+                let n = e - s
+                var ok = true
+                scratchL.withUnsafeMutableBufferPointer { lp in
+                    scratchR.withUnsafeMutableBufferPointer { rp in
+                        ok = stream.render(into: lp.baseAddress!, rp.baseAddress!,
+                                           count: n, isCancelled: isCancelled)
+                        var pL: Float = 0, pR: Float = 0
+                        vDSP_maxmgv(lp.baseAddress!, 1, &pL, vDSP_Length(n))
+                        vDSP_maxmgv(rp.baseAddress!, 1, &pR, vDSP_Length(n))
+                        peak = max(peak, max(pL, pR))
+                    }
+                }
+                if !ok { return false }
+                addUnits(n)
+                s = e
+            }
+            if isCancelled() { return false }
+            pvGain = peak > 0 ? 0.92 / peak : nil
             return true
 
         case .tiled(let layers, let layeredNormalize):
@@ -362,6 +429,42 @@ final class ChunkedRun {
                                            isCancelled: isCancelled, onBlocksDone: nil)
                 if isCancelled() { cancelled = true; return }
                 if let g = freezeGain {
+                    var gg = g
+                    vDSP_vsmul(outL, 1, &gg, outL, 1, vDSP_Length(n))
+                    vDSP_vsmul(outR, 1, &gg, outR, 1, vDSP_Length(n))
+                }
+
+            case .granular(let kernel):
+                kernel.renderRangeParallel(a, b, outL: outL, outR: outR,
+                                           isCancelled: isCancelled, onGrainsDone: nil)
+                if isCancelled() { cancelled = true; return }
+                if let g = granularGain {
+                    var gg = g
+                    vDSP_vsmul(outL, 1, &gg, outL, 1, vDSP_Length(n))
+                    vDSP_vsmul(outR, 1, &gg, outR, 1, vDSP_Length(n))
+                }
+
+            case .phaseVocoder(let spec):
+                // Sequential streams: the main cursor walks [0, finalFrames)
+                // and a second cursor walks the loop-tail region. Both only
+                // ever move forward; a fresh stream fast-forwards (renders
+                // and discards) to its starting offset.
+                let isTailRegion = a >= plan.finalFrames
+                var stream = isTailRegion ? pvTail : pvMain
+                if stream == nil || (stream!.position > a) {
+                    stream = spec.makeStream()
+                    if isTailRegion { pvTail = stream } else { pvMain = stream }
+                }
+                guard let s = stream else { return }
+                if s.position < a {
+                    guard s.skip(a - s.position, isCancelled: isCancelled) else {
+                        cancelled = true; return
+                    }
+                }
+                guard s.render(into: outL, outR, count: n, isCancelled: isCancelled) else {
+                    cancelled = true; return
+                }
+                if let g = pvGain {
                     var gg = g
                     vDSP_vsmul(outL, 1, &gg, outL, 1, vDSP_Length(n))
                     vDSP_vsmul(outR, 1, &gg, outR, 1, vDSP_Length(n))
@@ -483,6 +586,8 @@ final class ChunkedRun {
         tailR = [Float](repeating: 0, count: chunkFrames)
         nextStart = 0
         wasCancelled = false
+        pvMain = nil
+        pvTail = nil
     }
 
     /// Rewinds the cursor to frame 0 without touching the (still valid)
@@ -491,6 +596,8 @@ final class ChunkedRun {
     /// forever without re-rendering anything up front.
     func rewindDelivery() {
         nextStart = 0
+        pvMain = nil
+        pvTail = nil
     }
 
     /// Renders and returns the next chunk of the final timeline, applying

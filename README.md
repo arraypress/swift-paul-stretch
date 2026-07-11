@@ -12,10 +12,20 @@ memory, so an hour-long export never has to exist in RAM.
 - 🌀 **Classic PaulStretch** — windowed STFT with per-window phase
   randomisation and 4× Hann overlap-add; stretch ratios into the thousands
   with layering (1/3/5 passes), FFT-domain pitch shift and onset preservation.
+- ✨ **Shimmer layers** — layer presets with per-layer pitch offsets
+  (octave-up / sub-octave voices) for Eno-style shimmer drones.
 - 🐢 **Tape slow-down** — varispeed "slowed + reverb" treatment, tiled with
   equal-power crossfades to any target length. No FFT, nearly free.
 - ❄️ **Spectral freeze** — capture one instant's spectrum and sustain it
-  forever with shimmering random phase; a smear control morphs tonal → washy.
+  forever with shimmering random phase; a smear control morphs tonal → washy,
+  and a scan control lets the frozen spectrum drift through the source —
+  frozen but alive.
+- 🎼 **Phase-vocoder stretch** — coherent, propagated phases for clean
+  2–8× slow-downs that keep the source's structure and pitch: no wash, no
+  tape pitch-drop, and a fraction of PaulStretch's amplitude flutter.
+- 🌫 **Granular cloud** — dense Hann grains with position jitter, pitch
+  spread and stereo scatter; the grainy, shimmering sibling of the
+  PaulStretch wash.
 - 📱 **iOS-safe chunked rendering** — stream any render as ordered chunks or
   straight to disk with a peak footprint of a few megabytes,
   **bit-for-bit identical** to the in-memory render.
@@ -178,7 +188,29 @@ for try await chunk in StretchRenderer.renderChunkSequence(source, parameters: p
 params.mode = .paulStretch     // the classic wash (layering, pitch, onsets)
 params.mode = .tapeSlow        // varispeed slow-down, tiled to length
 params.mode = .spectralFreeze  // one frozen instant, sustained forever
+params.mode = .phaseVocoder    // clean structural stretch, pitch preserved
+params.mode = .granularCloud   // grain cloud: jitter, pitch spread, pan scatter
 ```
+
+```swift
+// Shimmer drones: layering presets with pitched voices.
+params.layering = .shimmer         // adds an octave-up stretch layer
+params.layering = .shimmerDeep     // octave-up + sub-octave
+
+// A freeze that slowly morphs through the source:
+params.mode = .spectralFreeze
+params.freezeScan = 0.6            // capture point drifts 60% of the way
+
+// Granular clouds:
+params.mode = .granularCloud
+params.grainSeconds = 0.12
+params.grainPitchSpread = 7        // grains scattered across ±7 semitones
+params.grainPanSpread = 1.0        // full stereo field
+```
+
+Notes: the phase vocoder wants short windows (`windowSeconds` ≈ 0.05–0.1)
+and ignores layering/phase-randomness; its chunked path renders through
+sequential streams (single-core) — still far faster than realtime.
 
 ### Batch variations
 

@@ -30,18 +30,30 @@ public enum LayerPreset: String, CaseIterable, Sendable, Codable {
     /// Five passes at 0.25× / 0.5× / 1.0× / 2.0× / 4.0× of the target
     /// duration — the densest, slowest-moving wash.
     case lush
+
+    /// Three passes with an octave-up voice mixed in — the Eno-style
+    /// "shimmer" drone. Layer pitch offsets stack on top of
+    /// ``StretchParameters/pitchSemitones``.
+    case shimmer
+
+    /// ``shimmer`` with the slow layer dropped an octave as well — a wider,
+    /// darker shimmer with a sub foundation.
+    case shimmerDeep
 }
 
 extension LayerPreset {
 
-    /// The (duration scale, mix gain) recipe for each preset, or `nil` for
-    /// ``off`` (a single unscaled, unity-gain pass).
-    var layers: [(scale: Double, gain: Float)]? {
+    /// The (duration scale, mix gain, pitch offset in semitones) recipe for
+    /// each preset, or `nil` for ``off`` (a single unscaled, unity-gain,
+    /// unshifted pass).
+    var layers: [(scale: Double, gain: Float, pitch: Double)]? {
         switch self {
-        case .off:      return nil
-        case .subtle:   return [(0.7, 0.45), (1.0, 0.75), (1.4, 0.45)]
-        case .standard: return [(0.5, 0.55), (1.0, 0.70), (2.0, 0.50)]
-        case .lush:     return [(0.25, 0.40), (0.5, 0.55), (1.0, 0.70), (2.0, 0.55), (4.0, 0.40)]
+        case .off:         return nil
+        case .subtle:      return [(0.7, 0.45, 0), (1.0, 0.75, 0), (1.4, 0.45, 0)]
+        case .standard:    return [(0.5, 0.55, 0), (1.0, 0.70, 0), (2.0, 0.50, 0)]
+        case .lush:        return [(0.25, 0.40, 0), (0.5, 0.55, 0), (1.0, 0.70, 0), (2.0, 0.55, 0), (4.0, 0.40, 0)]
+        case .shimmer:     return [(0.5, 0.55, 0), (1.0, 0.70, 0), (1.0, 0.45, 12)]
+        case .shimmerDeep: return [(0.5, 0.50, -12), (1.0, 0.70, 0), (1.0, 0.45, 12)]
         }
     }
 }

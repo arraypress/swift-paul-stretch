@@ -97,6 +97,37 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     /// (``StretchMode/spectralFreeze`` only).
     public var freezeSmear: Double = 0.1
 
+    /// How far the freeze's capture point drifts through the source over
+    /// the render, `0…1` (``StretchMode/spectralFreeze`` only).
+    ///
+    /// `0` is the classic static freeze; above zero the captured spectrum
+    /// slowly scans from ``freezePosition`` toward the end of the source —
+    /// "frozen but alive". With ``seamlessLoop`` the loop crossfade blends
+    /// the scan back to its starting spectrum.
+    public var freezeScan: Double = 0
+
+    // MARK: Granular cloud (``StretchMode/granularCloud`` only)
+
+    /// The length of each grain, in seconds.
+    public var grainSeconds: Double = 0.15
+
+    /// How many grains overlap at any instant (grain spacing =
+    /// ``grainSeconds`` / density). Higher is denser and smoother.
+    public var grainDensity: Double = 8
+
+    /// Random offset of each grain's source position, as a fraction of the
+    /// source duration (`0…1`). Higher values blur the scrub position into
+    /// a wider cloud.
+    public var grainPositionJitter: Double = 0.05
+
+    /// Random per-grain pitch, in ± semitones. `12` scatters grains across
+    /// a full octave; ``pitchSemitones`` shifts the whole cloud.
+    public var grainPitchSpread: Double = 0
+
+    /// Random per-grain stereo position, `0…1` (`0` = centred mono cloud,
+    /// `1` = grains spread across the full stereo field).
+    public var grainPanSpread: Double = 0.6
+
     /// Render a seamless loop instead of a one-shot.
     ///
     /// The pipeline renders one loop-crossfade longer than
@@ -115,4 +146,44 @@ public struct StretchParameters: Sendable, Codable, Equatable {
 
     /// Creates a parameter set with the default layered-drone settings.
     public init() {}
+
+    // MARK: Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, targetSeconds, maxStretch, layering, windowSeconds,
+             phaseRandomness, pitchSemitones, onsetSensitivity, tapeSpeed,
+             reverse, stereoWidth, freezePosition, freezeSmear, freezeScan,
+             grainSeconds, grainDensity, grainPositionJitter,
+             grainPitchSpread, grainPanSpread,
+             seamlessLoop, fadeInSeconds, fadeOutSeconds
+    }
+
+    /// Tolerant decoding: any field missing from the JSON (a preset saved
+    /// by an older library version) keeps its default, so stored presets
+    /// survive library upgrades.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(StretchMode.self, forKey: .mode) ?? mode
+        targetSeconds = try c.decodeIfPresent(Double.self, forKey: .targetSeconds) ?? targetSeconds
+        maxStretch = try c.decodeIfPresent(Double.self, forKey: .maxStretch) ?? maxStretch
+        layering = try c.decodeIfPresent(LayerPreset.self, forKey: .layering) ?? layering
+        windowSeconds = try c.decodeIfPresent(Double.self, forKey: .windowSeconds) ?? windowSeconds
+        phaseRandomness = try c.decodeIfPresent(Double.self, forKey: .phaseRandomness) ?? phaseRandomness
+        pitchSemitones = try c.decodeIfPresent(Double.self, forKey: .pitchSemitones) ?? pitchSemitones
+        onsetSensitivity = try c.decodeIfPresent(Double.self, forKey: .onsetSensitivity) ?? onsetSensitivity
+        tapeSpeed = try c.decodeIfPresent(Double.self, forKey: .tapeSpeed) ?? tapeSpeed
+        reverse = try c.decodeIfPresent(Bool.self, forKey: .reverse) ?? reverse
+        stereoWidth = try c.decodeIfPresent(Double.self, forKey: .stereoWidth) ?? stereoWidth
+        freezePosition = try c.decodeIfPresent(Double.self, forKey: .freezePosition) ?? freezePosition
+        freezeSmear = try c.decodeIfPresent(Double.self, forKey: .freezeSmear) ?? freezeSmear
+        freezeScan = try c.decodeIfPresent(Double.self, forKey: .freezeScan) ?? freezeScan
+        grainSeconds = try c.decodeIfPresent(Double.self, forKey: .grainSeconds) ?? grainSeconds
+        grainDensity = try c.decodeIfPresent(Double.self, forKey: .grainDensity) ?? grainDensity
+        grainPositionJitter = try c.decodeIfPresent(Double.self, forKey: .grainPositionJitter) ?? grainPositionJitter
+        grainPitchSpread = try c.decodeIfPresent(Double.self, forKey: .grainPitchSpread) ?? grainPitchSpread
+        grainPanSpread = try c.decodeIfPresent(Double.self, forKey: .grainPanSpread) ?? grainPanSpread
+        seamlessLoop = try c.decodeIfPresent(Bool.self, forKey: .seamlessLoop) ?? seamlessLoop
+        fadeInSeconds = try c.decodeIfPresent(Double.self, forKey: .fadeInSeconds) ?? fadeInSeconds
+        fadeOutSeconds = try c.decodeIfPresent(Double.self, forKey: .fadeOutSeconds) ?? fadeOutSeconds
+    }
 }

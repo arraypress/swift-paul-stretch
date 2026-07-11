@@ -33,6 +33,10 @@ public enum SpectralFreezer {
     ///   - position: The capture point, `0…1` through the source.
     ///   - smear: Magnitude blur amount, `0…1` — low keeps tonal peaks, high
     ///     washes toward noise.
+    ///   - scan: How far the capture point drifts through the source over
+    ///     the render, `0…1`. `0` (the default) is the classic static
+    ///     freeze; above zero the frozen spectrum slowly morphs as the
+    ///     capture scans from `position` toward the end of the source.
     ///   - targetSeconds: The duration to synthesise, in seconds.
     ///   - windowSeconds: The STFT window length, in seconds (rounded up to
     ///     a power-of-two frame count).
@@ -45,6 +49,7 @@ public enum SpectralFreezer {
     public static func render(_ input: StereoBuffer,
                               position: Double,
                               smear: Double,
+                              scan: Double = 0,
                               targetSeconds: Double,
                               windowSeconds: Double = 0.25,
                               seed: UInt64 = PaulStretcher.defaultSeed,
@@ -53,6 +58,7 @@ public enum SpectralFreezer {
         guard let kernel = FreezeKernel(input: input,
                                         positionNorm: position,
                                         smear: smear,
+                                        scan: scan,
                                         targetSeconds: targetSeconds,
                                         windowSeconds: windowSeconds,
                                         seed: seed) else {

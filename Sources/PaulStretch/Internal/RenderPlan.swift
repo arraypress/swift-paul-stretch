@@ -37,8 +37,12 @@ struct RenderPlan {
         /// target. `layeredNormalize` is `true` when layering is active
         /// (the mix is then peak-normalised to 0.92 like the reference).
         case tiled([LayerPlan], layeredNormalize: Bool)
-        /// Spectral freeze.
+        /// Spectral freeze (static or scanning).
         case freeze(FreezeKernel)
+        /// Granular cloud.
+        case granular(GranularKernel)
+        /// Phase-vocoder stretch (sequential — rendered through streams).
+        case phaseVocoder(PVSpec)
         /// Nothing to render (source empty or too short to freeze).
         case empty
     }
@@ -80,6 +84,7 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
         if let kernel = FreezeKernel(input: src,
                                      positionNorm: p.freezePosition,
                                      smear: p.freezeSmear,
+                                     scan: p.freezeScan,
                                      targetSeconds: renderSeconds,
                                      windowSeconds: p.windowSeconds,
                                      seed: seed) {
@@ -89,14 +94,36 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
             path = .empty
             preLoopFrames = 0
         }
+    } else if p.mode == .granularCloud {
+        preLoopFrames = Int(renderSeconds * sr)
+        let kernel = GranularKernel(input: src,
+                                    outputLength: preLoopFrames,
+                                    grainSeconds: p.grainSeconds,
+                                    density: p.grainDensity,
+                                    positionJitter: p.grainPositionJitter,
+                                    pitchSpread: p.grainPitchSpread,
+                                    basePitch: p.pitchSemitones,
+                                    panSpread: p.grainPanSpread,
+                                    seed: seed)
+        path = .granular(kernel)
+    } else if p.mode == .phaseVocoder {
+        // The vocoder stretches (or compresses) to the target in one pass —
+        // no tiling, no layering (see StretchMode.phaseVocoder docs).
+        let desiredRatio = renderSeconds / src.duration
+        let spec = PVSpec(input: src,
+                          ratio: max(0.05, desiredRatio),
+                          windowSeconds: p.windowSeconds,
+                          pitchSemitones: p.pitchSemitones)
+        path = .phaseVocoder(spec)
+        preLoopFrames = Int(renderSeconds * sr)
     } else {
         // Tape-slow caps the stretch ratio at 1 (no PaulStretch) — the
         // varispeed source is just tile-looped to fill the target.
         let effMaxStretch = p.mode == .tapeSlow ? 1.0 : p.maxStretch
         let layered = (p.mode == .paulStretch && p.layering != .off)
-        let recipes: [(scale: Double, gain: Float)] = layered
-            ? (p.layering.layers ?? [(1.0, 1.0)])
-            : [(1.0, 1.0)]
+        let recipes: [(scale: Double, gain: Float, pitch: Double)] = layered
+            ? (p.layering.layers ?? [(1.0, 1.0, 0)])
+            : [(1.0, 1.0, 0)]
         let inputDur = src.duration
 
         var layers: [LayerPlan] = []
@@ -110,7 +137,7 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                                 ratio: ratio,
                                 windowSeconds: p.windowSeconds,
                                 phaseRandomness: p.phaseRandomness,
-                                pitchSemitones: p.pitchSemitones,
+                                pitchSemitones: p.pitchSemitones + recipe.pitch,
                                 onsetSensitivity: p.onsetSensitivity,
                                 seed: layerSeed)
             let stretchedFrames = kernel?.outputLength ?? src.frameCount

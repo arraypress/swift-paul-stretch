@@ -88,6 +88,45 @@ public enum StretchRenderer {
                                              isCancelled: isCancelled, progress: progress)
             if out.isEmpty { return out }
 
+        case .granular(let kernel):
+            let totalFrames = plan.preLoopFrames
+            var outL = [Float](repeating: 0, count: totalFrames)
+            var outR = [Float](repeating: 0, count: totalFrames)
+            if totalFrames > 0 {
+                outL.withUnsafeMutableBufferPointer { lp in
+                    outR.withUnsafeMutableBufferPointer { rp in
+                        kernel.renderRangeParallel(0, totalFrames,
+                                                   outL: lp.baseAddress!, outR: rp.baseAddress!,
+                                                   isCancelled: isCancelled, onGrainsDone: nil)
+                    }
+                }
+            }
+            if isCancelled() { return StereoBuffer(l: [], r: [], sampleRate: plan.sampleRate) }
+            normalizeToPeak(&outL, &outR, target: 0.92)
+            progress?(1)
+            out = StereoBuffer(l: outL, r: outR, sampleRate: plan.sampleRate)
+
+        case .phaseVocoder(let spec):
+            let totalFrames = plan.preLoopFrames
+            guard let stream = spec.makeStream() else {
+                return StereoBuffer(l: [], r: [], sampleRate: plan.sampleRate)
+            }
+            var outL = [Float](repeating: 0, count: totalFrames)
+            var outR = [Float](repeating: 0, count: totalFrames)
+            var ok = true
+            if totalFrames > 0 {
+                outL.withUnsafeMutableBufferPointer { lp in
+                    outR.withUnsafeMutableBufferPointer { rp in
+                        ok = stream.render(into: lp.baseAddress!, rp.baseAddress!,
+                                           count: totalFrames, isCancelled: isCancelled)
+                    }
+                }
+            }
+            if !ok || isCancelled() { return StereoBuffer(l: [], r: [], sampleRate: plan.sampleRate) }
+            normalizeToPeak(&outL, &outR, target: 0.92)
+            progress?(1)
+            out = StereoBuffer(l: outL, r: outR, sampleRate: plan.sampleRate)
+
         case .tiled(let layers, let layeredNormalize):
             guard let mixed = renderTiledFull(plan, layers: layers,
                                               layeredNormalize: layeredNormalize,

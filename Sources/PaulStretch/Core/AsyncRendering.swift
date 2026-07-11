@@ -172,18 +172,19 @@ extension SpectralFreezer {
 
     /// Freezes `input` and resynthesises `targetSeconds` of audio, honouring
     /// `Task` cancellation — the async form of
-    /// ``render(_:position:smear:targetSeconds:windowSeconds:seed:isCancelled:progress:)``.
+    /// ``render(_:position:smear:scan:targetSeconds:windowSeconds:seed:isCancelled:progress:)``.
     ///
     /// - Throws: `CancellationError` when the task is cancelled.
     public static func render(_ input: StereoBuffer,
                               position: Double,
                               smear: Double,
+                              scan: Double = 0,
                               targetSeconds: Double,
                               windowSeconds: Double = 0.25,
                               seed: UInt64 = PaulStretcher.defaultSeed,
                               progress: (@Sendable (Double) -> Void)? = nil) async throws -> StereoBuffer {
         try await runCancellableRender { isCancelled in
-            render(input, position: position, smear: smear,
+            render(input, position: position, smear: smear, scan: scan,
                    targetSeconds: targetSeconds, windowSeconds: windowSeconds,
                    seed: seed, isCancelled: isCancelled, progress: progress)
         }

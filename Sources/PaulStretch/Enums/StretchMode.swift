@@ -31,6 +31,24 @@ public enum StretchMode: String, CaseIterable, Sendable, Codable {
     /// Spectral freeze — the magnitude spectrum is captured at a single
     /// instant (``StretchParameters/freezePosition``) and resynthesised
     /// forever with fresh random phase every hop: one frozen moment,
-    /// shimmering indefinitely. See ``SpectralFreezer``.
+    /// shimmering indefinitely. With ``StretchParameters/freezeScan`` above
+    /// zero the capture point drifts through the source, so the frozen
+    /// spectrum slowly morphs. See ``SpectralFreezer``.
     case spectralFreeze
+
+    /// Classic phase-vocoder time stretch — phases are *propagated* between
+    /// windows instead of randomised, preserving the source's structure and
+    /// transient identity. The clean way to slow audio 2–8× without the
+    /// PaulStretch wash and without the pitch drop of ``tapeSlow``. Use
+    /// short windows (``StretchParameters/windowSeconds`` around
+    /// `0.05`–`0.1`); layering and phase randomness are ignored.
+    case phaseVocoder
+
+    /// Granular cloud — dense, Hann-windowed grains scattered from a scrub
+    /// position that advances through the source, with per-grain position
+    /// jitter, pitch spread and stereo pan. The other classic ambient
+    /// texture engine: grainy and shimmering where PaulStretch is smeared
+    /// and choral. Tuned by the `grain…` parameters on
+    /// ``StretchParameters``.
+    case granularCloud
 }
