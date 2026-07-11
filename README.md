@@ -17,8 +17,12 @@ memory, so an hour-long export never has to exist in RAM.
 - ❄️ **Spectral freeze** — capture one instant's spectrum and sustain it
   forever with shimmering random phase; a smear control morphs tonal → washy.
 - 📱 **iOS-safe chunked rendering** — stream any render as ordered chunks or
-  straight to a WAV file with a peak footprint of a few megabytes,
+  straight to disk with a peak footprint of a few megabytes,
   **bit-for-bit identical** to the in-memory render.
+- 💾 **Every Apple-encodable format** — WAV, AIFF, CAF, AAC (CBR/VBR/HE),
+  Apple Lossless, FLAC and Opus, with bit-depth/bit-rate/quality controls;
+  compressed formats encode on the fly during chunked export (a 60-minute
+  render: ~950 MB WAV vs ~115 MB AAC).
 - 🔁 **Seamless loops** — equal-power loop crossfade baked into the render,
   so a 45-second file repeats invisibly (the memory-free way to play
   "endless" ambience on iOS).
@@ -95,10 +99,20 @@ peak footprint of a few chunks:
 ```swift
 var params = StretchParameters()
 params.targetSeconds = 3600
-try StretchRenderer.renderToWAVFile(source, parameters: params,
-                                    url: exportURL,
-                                    progress: { print("\\($0 * 100)%") })
+try StretchRenderer.renderToFile(source, parameters: params,
+                                 url: exportURL,          // use .m4a for the AAC/ALAC formats
+                                 format: .aac256,          // ~115 MB/hour instead of ~950 MB WAV
+                                 progress: { print("\\($0 * 100)%") })
 ```
+
+`AudioFileFormat` covers everything Apple platforms can encode — `.wav` /
+`.aiff` / `.caf` PCM (16/24-bit int, 32-bit float), `.m4aAAC(bitRate:quality:)`,
+`.m4aAACVBR(quality:)`, `.m4aHEAAC(bitRate:)` (tiny background-ambience
+files), `.m4aALAC(bitDepth:)`, `.flac(bitDepth:)` and `.opusCAF(bitRate:)`
+(48 kHz streams only). One caveat: lossy `.m4a` files carry encoder
+priming, so a file meant to **loop directly in a streaming player** should
+be PCM or lossless — decoding an `.m4a` back to memory first loops
+seamlessly (AVFoundation trims the priming on read).
 
 Or drive the chunks yourself (feed a player, a network stream, …):
 

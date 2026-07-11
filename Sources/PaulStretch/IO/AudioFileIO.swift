@@ -74,7 +74,26 @@ public enum AudioFileIO {
         return StereoBuffer(l: l, r: r, sampleRate: sampleRate)
     }
 
+    /// Writes a stereo buffer to an audio file in any encodable format.
+    ///
+    /// The URL's file extension must match the format's container — see
+    /// ``AudioFileFormat/fileExtension``.
+    ///
+    /// - Parameters:
+    ///   - buffer: The audio to write.
+    ///   - url: The destination file URL (overwritten if present).
+    ///   - format: The on-disk format (PCM, AAC, ALAC, FLAC, Opus…).
+    /// - Throws: ``AudioFileIOError`` or `AVAudioFile` errors on I/O failure.
+    public static func write(_ buffer: StereoBuffer, to url: URL, format: AudioFileFormat) throws {
+        let writer = try StreamingAudioWriter(url: url, sampleRate: buffer.sampleRate, format: format)
+        try writer.append(l: buffer.l, r: buffer.r)
+        writer.close()
+    }
+
     /// Writes a stereo buffer to a PCM WAV file.
+    ///
+    /// A convenience for ``write(_:to:format:)`` with
+    /// ``AudioFileFormat/wav(bitDepth:)``.
     ///
     /// - Parameters:
     ///   - buffer: The audio to write.
@@ -82,9 +101,7 @@ public enum AudioFileIO {
     ///   - bitDepth: PCM bit depth, `16` or `24`. Defaults to `24`.
     /// - Throws: ``AudioFileIOError`` or `AVAudioFile` errors on I/O failure.
     public static func writeWAV(_ buffer: StereoBuffer, to url: URL, bitDepth: Int = 24) throws {
-        let writer = try StreamingWAVWriter(url: url, sampleRate: buffer.sampleRate, bitDepth: bitDepth)
-        try writer.append(l: buffer.l, r: buffer.r)
-        writer.close()
+        try write(buffer, to: url, format: .wav(bitDepth: bitDepth))
     }
 
     /// Builds a deinterleaved float `AVAudioPCMBuffer` from a stereo buffer,

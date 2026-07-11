@@ -9,7 +9,7 @@
 
 import Foundation
 
-/// Errors thrown by ``AudioFileIO`` and ``StreamingWAVWriter``.
+/// Errors thrown by ``AudioFileIO`` and ``StreamingAudioWriter``.
 public enum AudioFileIOError: LocalizedError, Sendable {
 
     /// An audio buffer could not be allocated.
@@ -18,8 +18,8 @@ public enum AudioFileIOError: LocalizedError, Sendable {
     /// Sample-rate/format conversion failed, with the underlying reason.
     case conversionFailed(String)
 
-    /// ``StreamingWAVWriter/append(l:r:)`` was called after
-    /// ``StreamingWAVWriter/close()``.
+    /// ``StreamingAudioWriter/append(l:r:)`` was called after
+    /// ``StreamingAudioWriter/close()``.
     case writerClosed
 
     public var errorDescription: String? {

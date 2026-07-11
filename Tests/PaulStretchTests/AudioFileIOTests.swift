@@ -104,7 +104,7 @@ final class AudioFileIOTests: XCTestCase {
 
         try AudioFileIO.writeWAV(src, to: urlA)
 
-        let writer = try StreamingWAVWriter(url: urlB, sampleRate: src.sampleRate)
+        let writer = try StreamingAudioWriter(url: urlB, sampleRate: src.sampleRate)
         let half = src.frameCount / 2
         try writer.append(l: Array(src.l[0..<half]), r: Array(src.r[0..<half]))
         try writer.append(l: Array(src.l[half...]), r: Array(src.r[half...]))
@@ -119,7 +119,7 @@ final class AudioFileIOTests: XCTestCase {
     func testWriterThrowsAfterClose() throws {
         let url = tempURL("closed")
         defer { try? FileManager.default.removeItem(at: url) }
-        let writer = try StreamingWAVWriter(url: url, sampleRate: 44_100)
+        let writer = try StreamingAudioWriter(url: url, sampleRate: 44_100)
         writer.close()
         XCTAssertThrowsError(try writer.append(l: [0], r: [0])) { error in
             guard case AudioFileIOError.writerClosed = error else {

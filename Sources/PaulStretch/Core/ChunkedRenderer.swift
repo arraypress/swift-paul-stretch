@@ -99,12 +99,58 @@ extension StretchRenderer {
                                isCancelled: isCancelled, handler: handler)
     }
 
-    /// Renders the full pipeline straight into a PCM WAV file, holding only
-    /// a few chunks in memory at a time.
+    /// Renders the full pipeline straight into an audio file in any
+    /// ``AudioFileFormat``, holding only a few chunks in memory at a time.
     ///
     /// This is the iOS-safe export path for long renders: a 60-minute file
     /// streams to disk with a peak footprint of a few megabytes instead of
-    /// gigabytes. On cancellation the partial file is deleted.
+    /// gigabytes, encoding on the fly for the compressed formats (a
+    /// 60-minute render is ~950 MB as 24-bit WAV but ~115 MB as 256 kbps
+    /// AAC — see ``AudioFileFormat``). On cancellation the partial file is
+    /// deleted. The URL's extension must match the format's container
+    /// (``AudioFileFormat/fileExtension``).
+    ///
+    /// - Parameters:
+    ///   - source: The source audio.
+    ///   - parameters: The render settings.
+    ///   - url: The destination file URL (overwritten if present).
+    ///   - format: The on-disk format. Defaults to ``AudioFileFormat/wav24``;
+    ///     use ``AudioFileFormat/aac256`` for compact iPhone exports.
+    ///   - chunkFrames: Frames per streamed chunk. Defaults to
+    ///     ``defaultChunkFrames``.
+    ///   - seed: The render seed. Defaults to ``PaulStretcher/defaultSeed``.
+    ///   - isCancelled: Polled periodically; return `true` to stop early.
+    ///   - progress: Called with the completed fraction, `0…1`.
+    /// - Returns: `true` when the file was written completely, `false` when
+    ///   the render was cancelled (and the partial file removed).
+    /// - Throws: ``AudioFileIOError`` or `AVAudioFile` errors on I/O failure.
+    @discardableResult
+    public static func renderToFile(_ source: StereoBuffer,
+                                    parameters: StretchParameters,
+                                    url: URL,
+                                    format: AudioFileFormat = .wav24,
+                                    chunkFrames: Int = defaultChunkFrames,
+                                    seed: UInt64 = PaulStretcher.defaultSeed,
+                                    isCancelled: () -> Bool = { false },
+                                    progress: ((Double) -> Void)? = nil) throws -> Bool {
+        let writer = try StreamingAudioWriter(url: url, sampleRate: source.sampleRate, format: format)
+        let completed = try renderChunks(source, parameters: parameters,
+                                         chunkFrames: chunkFrames, seed: seed,
+                                         isCancelled: isCancelled, progress: progress) { chunk in
+            try writer.append(l: chunk.l, r: chunk.r)
+        }
+        writer.close()
+        if !completed {
+            try? FileManager.default.removeItem(at: url)
+        }
+        return completed
+    }
+
+    /// Renders the full pipeline straight into a PCM WAV file.
+    ///
+    /// A convenience for
+    /// ``renderToFile(_:parameters:url:format:chunkFrames:seed:isCancelled:progress:)``
+    /// with ``AudioFileFormat/wav(bitDepth:)``.
     ///
     /// - Parameters:
     ///   - source: The source audio.
@@ -128,17 +174,9 @@ extension StretchRenderer {
                                        seed: UInt64 = PaulStretcher.defaultSeed,
                                        isCancelled: () -> Bool = { false },
                                        progress: ((Double) -> Void)? = nil) throws -> Bool {
-        let writer = try StreamingWAVWriter(url: url, sampleRate: source.sampleRate, bitDepth: bitDepth)
-        let completed = try renderChunks(source, parameters: parameters,
-                                         chunkFrames: chunkFrames, seed: seed,
-                                         isCancelled: isCancelled, progress: progress) { chunk in
-            try writer.append(l: chunk.l, r: chunk.r)
-        }
-        writer.close()
-        if !completed {
-            try? FileManager.default.removeItem(at: url)
-        }
-        return completed
+        try renderToFile(source, parameters: parameters, url: url,
+                         format: .wav(bitDepth: bitDepth), chunkFrames: chunkFrames,
+                         seed: seed, isCancelled: isCancelled, progress: progress)
     }
 }
 

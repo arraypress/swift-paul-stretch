@@ -169,14 +169,69 @@ public final class StreamingEffectsBaker {
 
 extension StretchRenderer {
 
-    /// Renders the full pipeline **with effects baked in** straight to a PCM
-    /// WAV file, holding only a few chunks in memory at a time.
+    /// Renders the full pipeline **with effects baked in** straight to an
+    /// audio file in any ``AudioFileFormat``, holding only a few chunks in
+    /// memory at a time.
     ///
     /// The effected equivalent of
-    /// ``StretchRenderer/renderToWAVFile(_:parameters:url:bitDepth:chunkFrames:seed:isCancelled:progress:)``:
+    /// ``StretchRenderer/renderToFile(_:parameters:url:format:chunkFrames:seed:isCancelled:progress:)``:
     /// each rendered chunk is run through a ``StreamingEffectsBaker`` before
     /// hitting disk, and the reverb/delay tail is appended at the end. On
     /// cancellation the partial file is deleted.
+    ///
+    /// - Parameters:
+    ///   - source: The source audio.
+    ///   - parameters: The render settings.
+    ///   - effects: The effect settings to bake into the file.
+    ///   - url: The destination file URL (overwritten if present). Its
+    ///     extension must match the format's container
+    ///     (``AudioFileFormat/fileExtension``).
+    ///   - format: The on-disk format. Defaults to ``AudioFileFormat/wav24``;
+    ///     use ``AudioFileFormat/aac256`` for compact iPhone exports.
+    ///   - chunkFrames: Frames per streamed chunk. Defaults to
+    ///     ``StretchRenderer/defaultChunkFrames``.
+    ///   - seed: The render seed. Defaults to ``PaulStretcher/defaultSeed``.
+    ///   - isCancelled: Polled periodically; return `true` to stop early.
+    ///   - progress: Called with the completed fraction, `0…1`.
+    /// - Returns: `true` when the file was written completely, `false` when
+    ///   the render was cancelled (and the partial file removed).
+    /// - Throws: ``AudioFileIOError`` when the effects engine cannot be set
+    ///   up, or `AVAudioFile` errors on I/O failure.
+    @discardableResult
+    public static func renderToFile(_ source: StereoBuffer,
+                                    parameters: StretchParameters,
+                                    effects: EffectsParameters,
+                                    url: URL,
+                                    format: AudioFileFormat = .wav24,
+                                    chunkFrames: Int = defaultChunkFrames,
+                                    seed: UInt64 = PaulStretcher.defaultSeed,
+                                    isCancelled: () -> Bool = { false },
+                                    progress: ((Double) -> Void)? = nil) throws -> Bool {
+        guard let baker = StreamingEffectsBaker(sampleRate: source.sampleRate, effects: effects) else {
+            throw AudioFileIOError.conversionFailed("could not configure the offline effects engine")
+        }
+        let writer = try StreamingAudioWriter(url: url, sampleRate: source.sampleRate, format: format)
+        let completed = try renderChunks(source, parameters: parameters,
+                                         chunkFrames: chunkFrames, seed: seed,
+                                         isCancelled: isCancelled, progress: progress) { chunk in
+            let wet = baker.process(l: chunk.l, r: chunk.r)
+            try writer.append(l: wet.l, r: wet.r)
+        }
+        if completed {
+            let flushed = baker.finish()
+            if !flushed.l.isEmpty { try writer.append(l: flushed.l, r: flushed.r) }
+        }
+        writer.close()
+        if !completed {
+            try? FileManager.default.removeItem(at: url)
+        }
+        return completed
+    }
+
+    /// Renders the full pipeline with effects baked in straight to a PCM
+    /// WAV file — a convenience for
+    /// ``renderToFile(_:parameters:effects:url:format:chunkFrames:seed:isCancelled:progress:)``
+    /// with ``AudioFileFormat/wav(bitDepth:)``.
     ///
     /// - Parameters:
     ///   - source: The source audio.
@@ -203,25 +258,9 @@ extension StretchRenderer {
                                        seed: UInt64 = PaulStretcher.defaultSeed,
                                        isCancelled: () -> Bool = { false },
                                        progress: ((Double) -> Void)? = nil) throws -> Bool {
-        guard let baker = StreamingEffectsBaker(sampleRate: source.sampleRate, effects: effects) else {
-            throw AudioFileIOError.conversionFailed("could not configure the offline effects engine")
-        }
-        let writer = try StreamingWAVWriter(url: url, sampleRate: source.sampleRate, bitDepth: bitDepth)
-        let completed = try renderChunks(source, parameters: parameters,
-                                         chunkFrames: chunkFrames, seed: seed,
-                                         isCancelled: isCancelled, progress: progress) { chunk in
-            let wet = baker.process(l: chunk.l, r: chunk.r)
-            try writer.append(l: wet.l, r: wet.r)
-        }
-        if completed {
-            let flushed = baker.finish()
-            if !flushed.l.isEmpty { try writer.append(l: flushed.l, r: flushed.r) }
-        }
-        writer.close()
-        if !completed {
-            try? FileManager.default.removeItem(at: url)
-        }
-        return completed
+        try renderToFile(source, parameters: parameters, effects: effects, url: url,
+                         format: .wav(bitDepth: bitDepth), chunkFrames: chunkFrames,
+                         seed: seed, isCancelled: isCancelled, progress: progress)
     }
 }
 
