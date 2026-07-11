@@ -52,6 +52,9 @@ memory, so an hour-long export never has to exist in RAM.
 - 🎛 **Optional stock effects** — a second product (`PaulStretchEffects`)
   wraps Apple's reverb/EQ/filter/delay as a live chain plus offline and
   streaming bakes, so what you monitor is what you export.
+- 🌠 **Shimmer reverb** — the library's own DSP (Freeverb tank + pitch-shifted
+  feedback), because `AVAudioEngine` graphs can't hold the feedback cycle
+  shimmer needs. The wash climbs in octaves; bakes offline and streams.
 - 📦 **Codable parameters** — persist presets as JSON straight from
   `StretchParameters` / `EffectsParameters`.
 
@@ -252,6 +255,13 @@ chain.apply(fx)                 // update any time, even while playing
 
 // Baked into an export (same parameters → what you hear is what you export):
 let wet = EffectsBaker.bake(drone, effects: fx)
+
+// Shimmer reverb (baked path only — feedback cycles can't live on an
+// AVAudioEngine graph; hosts re-bake to audition):
+fx.shimmerEnabled = true
+fx.shimmerPitch = 12          // octave-up bloom (+7 for fifths)
+fx.shimmerFeedback = 55
+let halo = EffectsBaker.bake(drone, effects: fx)
 
 // Or streamed, for long effected exports in bounded memory:
 try StretchRenderer.renderToWAVFile(source, parameters: params, effects: fx, url: exportURL)

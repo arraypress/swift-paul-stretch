@@ -47,6 +47,11 @@ public final class StreamingEffectsBaker {
     private let format: AVAudioFormat
     private var outChunk: AVAudioPCMBuffer?
     private let passthrough: Bool
+    /// Whether any stock `AVAudioUnit` effect is active (shimmer alone runs
+    /// without the offline engine).
+    private let stockActive: Bool
+    /// The shimmer stage, applied ahead of the stock chain.
+    private var shimmer: ShimmerReverb?
     private var finished = false
     /// The player starts only after the first buffer is queued — starting it
     /// earlier makes the node render silence until the next quantum and
@@ -73,8 +78,14 @@ public final class StreamingEffectsBaker {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return nil }
         self.format = format
         self.passthrough = !effects.isAnyEnabled
-        self.tailSeconds = (effects.reverbEnabled || effects.delayEnabled) ? EffectsBaker.tailSeconds : 0
-        guard !passthrough else { return }
+        self.stockActive = effects.reverbEnabled || effects.eqEnabled
+            || effects.filterEnabled || effects.delayEnabled
+        self.tailSeconds = (effects.shimmerEnabled ? ShimmerReverb.tailSeconds : 0)
+            + ((effects.reverbEnabled || effects.delayEnabled) ? EffectsBaker.tailSeconds : 0)
+        if effects.shimmerEnabled {
+            self.shimmer = ShimmerReverb(sampleRate: sampleRate, parameters: effects)
+        }
+        guard stockActive else { return }
 
         engine.attach(player)
         chain.install(in: engine, from: player, to: engine.mainMixerNode, format: format)
@@ -93,7 +104,7 @@ public final class StreamingEffectsBaker {
     }
 
     deinit {
-        if !passthrough { engine.stop() }
+        if stockActive { engine.stop() }
     }
 
     /// Queues one dry chunk and returns the previous chunk's wet audio.
@@ -113,8 +124,14 @@ public final class StreamingEffectsBaker {
     public func process(l: [Float], r: [Float]) -> (l: [Float], r: [Float]) {
         let n = min(l.count, r.count)
         if passthrough || finished || n == 0 { return (l, r) }
+
+        // Shimmer stage first (stateful pure DSP — no latency of its own).
+        let staged = shimmer?.process(l: l, r: r) ?? (l: l, r: r)
+        guard stockActive else { return staged }
+
         guard let inBuf = AudioFileIO.makePCMBuffer(
-            StereoBuffer(l: l, r: r, sampleRate: format.sampleRate), format: format) else { return (l, r) }
+            StereoBuffer(l: staged.l, r: staged.r, sampleRate: format.sampleRate),
+            format: format) else { return staged }
         player.scheduleBuffer(inBuf, at: nil, options: [], completionHandler: nil)
         if !playing { player.play(); playing = true }
 
@@ -123,24 +140,40 @@ public final class StreamingEffectsBaker {
         let toRender = pendingFrames
         pendingFrames = n
         guard toRender > 0 else { return ([], []) }
-        return renderFrames(toRender) ?? ([], [])
+        return renderFrames(toRender) ?? (l: [], r: [])
     }
 
-    /// Flushes the last queued chunk, renders the reverb/delay decay tail
-    /// and stops the engine. Call exactly once, after the last
-    /// ``process(l:r:)``.
+    /// Flushes the last queued chunk, renders the shimmer ring-out and the
+    /// reverb/delay decay tail, and stops the engine. Call exactly once,
+    /// after the last ``process(l:r:)``.
     ///
-    /// - Returns: The remaining wet audio plus the tail (empty in
+    /// - Returns: The remaining wet audio plus the tails (empty in
     ///   passthrough mode).
     public func finish() -> (l: [Float], r: [Float]) {
         if passthrough || finished { return ([], []) }
         finished = true
+
+        // The shimmer's own ring-out becomes the final input to the chain.
+        let ring = shimmer?.tail() ?? (l: [], r: [])
+        guard stockActive else { return ring }
         defer { engine.stop() }
-        let tailFrames = Int(tailSeconds * format.sampleRate)
-        let toRender = pendingFrames + tailFrames
+
+        if !ring.l.isEmpty,
+           let ringBuf = AudioFileIO.makePCMBuffer(
+               StereoBuffer(l: ring.l, r: ring.r, sampleRate: format.sampleRate),
+               format: format) {
+            player.scheduleBuffer(ringBuf, at: nil, options: [], completionHandler: nil)
+            if !playing { player.play(); playing = true }
+            pendingFrames += ring.l.count
+        }
+
+        let engineTail = (tailSeconds > 0)
+            ? Int((tailSeconds - (shimmer != nil ? ShimmerReverb.tailSeconds : 0)) * format.sampleRate)
+            : 0
+        let toRender = pendingFrames + max(0, engineTail)
         pendingFrames = 0
         guard toRender > 0 else { return ([], []) }
-        return renderFrames(toRender) ?? ([], [])
+        return renderFrames(toRender) ?? (l: [], r: [])
     }
 
     /// Pulls `count` frames out of the offline engine.

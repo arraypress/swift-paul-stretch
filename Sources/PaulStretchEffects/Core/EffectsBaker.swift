@@ -29,11 +29,12 @@ public enum EffectsBaker {
 
     /// Returns `input` with `effects` baked in.
     ///
-    /// With no effects enabled the input is returned untouched. When reverb
-    /// or delay is active the result is ``tailSeconds`` longer than the
-    /// input. If the offline engine cannot be set up, the dry input is
-    /// returned (matching the reference behaviour of failing safe rather
-    /// than throwing mid-export).
+    /// With no effects enabled the input is returned untouched. The shimmer
+    /// reverb (the library's own DSP — see ``ShimmerReverb``) runs first and
+    /// appends its own ring-out; the stock chain then adds ``tailSeconds``
+    /// when reverb or delay is active. If the offline engine cannot be set
+    /// up, the (shimmered) dry input is returned rather than throwing
+    /// mid-export.
     ///
     /// - Parameters:
     ///   - input: The dry audio.
@@ -42,6 +43,20 @@ public enum EffectsBaker {
     public static func bake(_ input: StereoBuffer, effects fx: EffectsParameters) -> StereoBuffer {
         guard fx.isAnyEnabled, input.frameCount > 0 else { return input }
         let sr = input.sampleRate
+
+        // Shimmer first: its haloed output feeds the stock chain, so a
+        // cathedral on top smooths the octave bloom.
+        var working = input
+        if fx.shimmerEnabled {
+            let shimmer = ShimmerReverb(sampleRate: sr, parameters: fx)
+            let wet = shimmer.process(l: input.l, r: input.r)
+            let ring = shimmer.tail()
+            working = StereoBuffer(l: wet.l + ring.l, r: wet.r + ring.r, sampleRate: sr)
+        }
+        let stockActive = fx.reverbEnabled || fx.eqEnabled || fx.filterEnabled || fx.delayEnabled
+        guard stockActive else { return working }
+        let input = working
+
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2),
               let inBuf = AudioFileIO.makePCMBuffer(input, format: format) else { return input }
 
