@@ -195,7 +195,14 @@ extension StretchRenderer {
 /// Every pass re-renders ranges through the same kernels and the same
 /// accumulation loops as the in-memory driver, so all arithmetic — order
 /// included — matches sample for sample.
-private final class ChunkedRun {
+///
+/// Delivery is a pull-based cursor (``prepareDelivery(chunkFrames:)`` +
+/// ``nextChunk(isCancelled:)``), so the same run can back the closure-based
+/// `renderChunks`, the async ``RenderChunkSequence`` and the realtime
+/// ``StretchSourceNode`` producer — including seamless looping via
+/// ``rewindDelivery()``, which replays the timeline without re-running the
+/// gain passes.
+final class ChunkedRun {
     let plan: RenderPlan
     let progress: ((Double) -> Void)?
 
@@ -431,103 +438,158 @@ private final class ChunkedRun {
         return !cancelled
     }
 
-    // MARK: Delivery pass
+    // MARK: Delivery cursor
 
-    /// Streams the final timeline to `handler` chunk by chunk, applying the
-    /// mix gain, stereo width and the loop crossfade or fade envelopes.
-    func deliver(chunkFrames: Int,
-                 isCancelled: () -> Bool,
-                 handler: (RenderChunk) throws -> Void) rethrows -> Bool {
+    /// Delivery cursor state — set up by ``prepareDelivery(chunkFrames:)``.
+    private var chunkFrames = 0
+    private var nextStart = 0
+    private var fadeIn = 0
+    private var fadeOut = 0
+    private var applyWidth = false
+    private var widthFactor: Float = 1
+    private var mixL: [Float] = []
+    private var mixR: [Float] = []
+    private var tailL: [Float] = []
+    private var tailR: [Float] = []
+
+    /// `true` when a delivery call stopped because `isCancelled` fired
+    /// (distinguishes cancellation from normal exhaustion after
+    /// ``nextChunk(isCancelled:)`` returns `nil`).
+    private(set) var wasCancelled = false
+
+    /// Prepares the delivery cursor: fade/width geometry and reusable chunk
+    /// scratch. Call once after ``computeGains(isCancelled:)`` (calling
+    /// again resets the cursor to frame 0).
+    func prepareDelivery(chunkFrames requested: Int) {
+        chunkFrames = max(1024, requested)
         let total = plan.finalFrames
         let p = plan.params
-        let sr = plan.sampleRate
-        let xf = plan.loopCrossfadeFrames
-        let width = p.stereoWidth
-        let applyWidth = abs(width - 1) >= 0.001
-        let w = Float(width)
 
         // Fade geometry (one-shot renders only), from the final length —
         // exactly how the in-memory path derives it.
-        var fadeIn = 0, fadeOut = 0
+        fadeIn = 0; fadeOut = 0
         if !p.seamlessLoop {
-            let (efi, efo) = effectiveFades(p.fadeInSeconds, p.fadeOutSeconds, Double(total) / sr)
-            fadeIn = max(0, min(total, Int(efi * sr)))
-            fadeOut = max(0, min(total - fadeIn, Int(efo * sr)))
+            let (efi, efo) = effectiveFades(p.fadeInSeconds, p.fadeOutSeconds,
+                                            Double(total) / plan.sampleRate)
+            fadeIn = max(0, min(total, Int(efi * plan.sampleRate)))
+            fadeOut = max(0, min(total - fadeIn, Int(efo * plan.sampleRate)))
+        }
+        applyWidth = abs(p.stereoWidth - 1) >= 0.001
+        widthFactor = Float(p.stereoWidth)
+
+        mixL = [Float](repeating: 0, count: chunkFrames)
+        mixR = [Float](repeating: 0, count: chunkFrames)
+        tailL = [Float](repeating: 0, count: chunkFrames)
+        tailR = [Float](repeating: 0, count: chunkFrames)
+        nextStart = 0
+        wasCancelled = false
+    }
+
+    /// Rewinds the cursor to frame 0 without touching the (still valid)
+    /// gains — the timeline replays with identical samples. This is how the
+    /// realtime node loops a ``StretchParameters/seamlessLoop`` render
+    /// forever without re-rendering anything up front.
+    func rewindDelivery() {
+        nextStart = 0
+    }
+
+    /// Renders and returns the next chunk of the final timeline, applying
+    /// the mix gain, stereo width and the loop crossfade or fade envelopes.
+    ///
+    /// Returns `nil` when the timeline is exhausted — or when cancelled, in
+    /// which case ``wasCancelled`` is set.
+    func nextChunk(isCancelled: () -> Bool) -> RenderChunk? {
+        let total = plan.finalFrames
+        let a = nextStart
+        guard a < total else { return nil }
+        if isCancelled() { wasCancelled = true; return nil }
+
+        let p = plan.params
+        let sr = plan.sampleRate
+        let xf = plan.loopCrossfadeFrames
+        let b = min(total, a + chunkFrames)
+        let n = b - a
+
+        guard renderMixRange(a, b, mixL: &mixL, mixR: &mixR, isCancelled: isCancelled) else {
+            wasCancelled = true
+            return nil
+        }
+        if let g = mixGain {
+            for f in 0..<n { mixL[f] *= g; mixR[f] *= g }
+        }
+        if applyWidth {
+            let w = widthFactor
+            for f in 0..<n {
+                let mid = (mixL[f] + mixR[f]) * 0.5
+                let side = (mixL[f] - mixR[f]) * 0.5 * w
+                mixL[f] = mid + side
+                mixR[f] = mid - side
+            }
         }
 
-        var mixL = [Float](repeating: 0, count: chunkFrames)
-        var mixR = [Float](repeating: 0, count: chunkFrames)
-        var tailL = [Float](repeating: 0, count: chunkFrames)
-        var tailR = [Float](repeating: 0, count: chunkFrames)
-
-        var a = 0
-        while a < total {
-            if isCancelled() { return false }
-            let b = min(total, a + chunkFrames)
-            let n = b - a
-
-            guard renderMixRange(a, b, mixL: &mixL, mixR: &mixR, isCancelled: isCancelled) else { return false }
+        if xf > 0 && a < xf {
+            // Loop head: crossfade in the matching tail of the pre-loop
+            // timeline (rendered through the identical pipeline).
+            let headEnd = min(b, xf)
+            let tailStart = total + a
+            let tailEnd = total + headEnd
+            guard renderMixRange(tailStart, tailEnd, mixL: &tailL, mixR: &tailR, isCancelled: isCancelled) else {
+                wasCancelled = true
+                return nil
+            }
+            let tn = tailEnd - tailStart
             if let g = mixGain {
-                for f in 0..<n { mixL[f] *= g; mixR[f] *= g }
+                for f in 0..<tn { tailL[f] *= g; tailR[f] *= g }
             }
             if applyWidth {
-                for f in 0..<n {
-                    let mid = (mixL[f] + mixR[f]) * 0.5
-                    let side = (mixL[f] - mixR[f]) * 0.5 * w
-                    mixL[f] = mid + side
-                    mixR[f] = mid - side
+                let w = widthFactor
+                for f in 0..<tn {
+                    let mid = (tailL[f] + tailR[f]) * 0.5
+                    let side = (tailL[f] - tailR[f]) * 0.5 * w
+                    tailL[f] = mid + side
+                    tailR[f] = mid - side
                 }
             }
-
-            if xf > 0 && a < xf {
-                // Loop head: crossfade in the matching tail of the pre-loop
-                // timeline (rendered through the identical pipeline).
-                let headEnd = min(b, xf)
-                let tailStart = total + a
-                let tailEnd = total + headEnd
-                guard renderMixRange(tailStart, tailEnd, mixL: &tailL, mixR: &tailR, isCancelled: isCancelled) else { return false }
-                let tn = tailEnd - tailStart
-                if let g = mixGain {
-                    for f in 0..<tn { tailL[f] *= g; tailR[f] *= g }
-                }
-                if applyWidth {
-                    for f in 0..<tn {
-                        let mid = (tailL[f] + tailR[f]) * 0.5
-                        let side = (tailL[f] - tailR[f]) * 0.5 * w
-                        tailL[f] = mid + side
-                        tailR[f] = mid - side
-                    }
-                }
-                for i in a..<headEnd {
-                    let k = Float(i) / Float(xf)
-                    let fin = k.squareRoot(); let fout = (1 - k).squareRoot()
-                    mixL[i - a] = mixL[i - a] * fin + tailL[i - a] * fout
-                    mixR[i - a] = mixR[i - a] * fin + tailR[i - a] * fout
-                }
-            } else if !p.seamlessLoop {
-                if fadeIn > 0 && a < fadeIn {
-                    for j in a..<min(b, fadeIn) {
-                        let g = Float(j) / Float(fadeIn)
-                        mixL[j - a] *= g; mixR[j - a] *= g
-                    }
-                }
-                if fadeOut > 0 && b > total - fadeOut {
-                    for j in max(a, total - fadeOut)..<b {
-                        let g = Float(total - 1 - j) / Float(fadeOut)
-                        mixL[j - a] *= g; mixR[j - a] *= g
-                    }
+            for i in a..<headEnd {
+                let k = Float(i) / Float(xf)
+                let fin = k.squareRoot(); let fout = (1 - k).squareRoot()
+                mixL[i - a] = mixL[i - a] * fin + tailL[i - a] * fout
+                mixR[i - a] = mixR[i - a] * fin + tailR[i - a] * fout
+            }
+        } else if !p.seamlessLoop {
+            if fadeIn > 0 && a < fadeIn {
+                for j in a..<min(b, fadeIn) {
+                    let g = Float(j) / Float(fadeIn)
+                    mixL[j - a] *= g; mixR[j - a] *= g
                 }
             }
-
-            let chunk = RenderChunk(startFrame: a,
-                                    totalFrames: total,
-                                    l: Array(mixL[0..<n]),
-                                    r: Array(mixR[0..<n]),
-                                    sampleRate: sr)
-            try handler(chunk)
-            addUnits(n)
-            a = b
+            if fadeOut > 0 && b > total - fadeOut {
+                for j in max(a, total - fadeOut)..<b {
+                    let g = Float(total - 1 - j) / Float(fadeOut)
+                    mixL[j - a] *= g; mixR[j - a] *= g
+                }
+            }
         }
+
+        nextStart = b
+        addUnits(n)
+        return RenderChunk(startFrame: a,
+                           totalFrames: total,
+                           l: Array(mixL[0..<n]),
+                           r: Array(mixR[0..<n]),
+                           sampleRate: sr)
+    }
+
+    /// Streams the final timeline to `handler` chunk by chunk — the
+    /// closure-based driver over the cursor.
+    func deliver(chunkFrames: Int,
+                 isCancelled: () -> Bool,
+                 handler: (RenderChunk) throws -> Void) rethrows -> Bool {
+        prepareDelivery(chunkFrames: chunkFrames)
+        while let chunk = nextChunk(isCancelled: isCancelled) {
+            try handler(chunk)
+        }
+        if wasCancelled { return false }
         progress?(1)
         return true
     }

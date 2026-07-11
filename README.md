@@ -26,6 +26,13 @@ memory, so an hour-long export never has to exist in RAM.
 - 🔁 **Seamless loops** — equal-power loop crossfade baked into the render,
   so a 45-second file repeats invisibly (the memory-free way to play
   "endless" ambience on iOS).
+- 🎧 **Realtime playback node** — `StretchSourceNode` synthesises the
+  timeline just-in-time on a background thread and plays it through an
+  `AVAudioSourceNode`: endless looped ambience with **zero pre-render** and
+  a few megabytes of lookahead, for all three engines.
+- ⏳ **async/await throughout** — `try await` renders that honour `Task`
+  cancellation, plus a pull-based `AsyncSequence` of chunks with natural
+  backpressure.
 - 🎲 **Deterministic seeding** — same source + parameters + seed always
   reproduces identical output; variation seeds give batch-friendly
   alternates of the same settings.
@@ -125,6 +132,45 @@ StretchRenderer.renderChunks(source, parameters: params) { chunk in
 Chunked output is **bit-for-bit identical** to
 `StretchRenderer.render(...)` — the test suite asserts exact equality for
 every mode.
+
+### Realtime playback — zero pre-render
+
+For playback (rather than export) you can skip rendering entirely:
+`StretchSourceNode` synthesises the timeline just-in-time while it plays,
+holding only a few seconds of lookahead. With `seamlessLoop` it wraps
+forever — endless ambience from a one-second source with ~2 MB of memory:
+
+```swift
+var params = StretchParameters()
+params.targetSeconds = 120
+params.seamlessLoop = true
+let node = try await StretchSourceNode.prepare(source: source, parameters: params)
+
+engine.attach(node.avAudioNode)
+engine.connect(node.avAudioNode, to: engine.mainMixerNode, format: node.format)
+try engine.start()                       // plays endlessly, synthesised live
+```
+
+Works for all three modes (tape-slow even prepares instantly — it has no
+peak passes). The node plays the *same deterministic timeline* the offline
+renderers produce, so what you preview live is exactly what an export
+writes.
+
+### async/await
+
+Every render has an async form that runs off the cooperative pool and
+honours `Task` cancellation (cancelling throws `CancellationError` and, for
+file renders, deletes the partial file):
+
+```swift
+let drone = try await StretchRenderer.render(source, parameters: params)
+try await StretchRenderer.renderToFile(source, parameters: params,
+                                       url: exportURL, format: .aac256)
+
+for try await chunk in StretchRenderer.renderChunkSequence(source, parameters: params) {
+    feed(chunk)      // pull-based: chunks are computed as you consume them
+}
+```
 
 ### Modes
 
