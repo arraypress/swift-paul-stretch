@@ -90,12 +90,13 @@ memory, so an hour-long export never has to exist in RAM.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/arraypress/swift-paul-stretch.git", from: "1.0.0")
+    .package(url: "https://github.com/arraypress/swift-paul-stretch.git", from: "2.0.0")
 ]
 ```
 
-Add `PaulStretch` to your target; add `PaulStretchEffects` as well if you
-want the stock effect chain.
+Add `PaulStretch` to your target; add `PaulStretchEffects` for the effect
+chains and channel strips, and `PaulStretchSession` for the multitrack
+arrangement model.
 
 ## Usage
 
@@ -308,41 +309,42 @@ let wet = EffectStackBaker.bake(dry, stack: strip)
 
 ### Ambient sessions (PaulStretchSession)
 
-A time-based multitrack model for generative ambient — the ruler is
-seconds, not bars. Each `Track` holds one voice (a sample loop or a
-generative engine), its own `EffectStack`, gain/pan with session-length
-automation lanes, and its own loop length: loops of *different* lengths
-phase against each other endlessly (the tape-loop model behind *Music for
-Airports*). Everything is deterministic — the same session bounces the
-identical file.
+A time-based multitrack arrangement model for generative ambient — the
+ruler is seconds, not bars. Tracks hold `Clip`s: blocks with a timeline
+position, placed length, left-trim, gain, edge fades, and loop-fill (the
+clip's voice tiles to fill the block; blocks with different voice lengths
+phase against each other endlessly — the tape-loop model behind *Music for
+Airports*). A clip's voice renders deterministically and caches:
+**dragging, trimming and fading never re-render** — only source or strip
+changes do. The same session always bounces the identical file.
 
 ```swift
 import PaulStretchSession
 
 var session = Session()
-session.durationSeconds = 1800                          // a 30-minute piece
 
-var piano = Track(name: "piano drone",
-                  source: .generative(GenerativeSource(audio: .init(path: noteURL.path),
-                                                       parameters: droneParams, seed: 3)))
-piano.stack = EffectStack([EffectDevice(.shimmer(shimmer))])
-
-var field = Track(name: "field recording",
-                  source: .sample(SampleSource(audio: .init(path: rainURL.path))))
-field.loopPhaseSeconds = 13                              // enter mid-loop
-field.gainLane = AutomationLane(points: [AutomationPoint(t: 0, v: 0.2),
+var track = Track(name: "piano drone")
+track.stack = EffectStack([EffectDevice(.shimmer(shimmer))])   // baked per voice
+track.gainLane = AutomationLane(points: [AutomationPoint(t: 0, v: 0.2),
                                          AutomationPoint(t: 1, v: 0.9)])
 
-session.tracks = [piano, field]
+var clip = Clip(name: "drone",
+                source: .generative(GenerativeSource(audio: .init(path: noteURL.path),
+                                                     parameters: droneParams, seed: 3)),
+                startSeconds: 0, durationSeconds: 1800)  // 61 s voice tiles 30 min
+clip.fadeInSeconds = 20
+track.clips = [clip]
+session.tracks = [track]
+session.durationSeconds = 1800
 session.master = EffectStack([EffectDevice(.convolutionReverb(hall))])
 
 let mix = try SessionRenderer.render(session)            // deterministic bounce
 try AudioFileIO.write(mix, to: outURL, format: .aac256)
 
 // Live: render voices once (cache by SessionRenderer.voiceCacheKey), then
-let mixer = SessionMixer()                               // sample-locked transport
-mixer.prepare(session: session, voices: voices)
-mixer.play(from: 0)                                      // gain/pan/mute/solo live
+let mixer = SessionMixer()          // player-per-clip, one shared sample-locked anchor
+mixer.prepare(session: session, voices: voicesByClipID)
+mixer.play(from: 0)                 // live gain/pan/mute/solo + `levels` meters
 ```
 
 ### Playing renders (PaulStretchEffects)
@@ -445,7 +447,7 @@ exists for exactly this.
 swift test -c release
 ```
 
-145 tests cover FFT correctness against a scalar oracle, determinism, every
+147 tests cover FFT correctness against a scalar oracle, determinism, every
 `StereoBuffer` transform, all pipeline modes, file I/O round trips and the
 effects bakers. The load-bearing suite asserts that chunked output is
 **bit-identical** to in-memory output across the full mode matrix and
