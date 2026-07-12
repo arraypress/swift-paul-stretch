@@ -69,6 +69,15 @@ public final class ShimmerReverb {
     private var apIdxL = [Int](repeating: 0, count: 4)
     private var apIdxR = [Int](repeating: 0, count: 4)
 
+    // MARK: Feedback climb pre-delay
+
+    /// Delay line in the pitched feedback path — sets how long each octave
+    /// step waits before re-entering the tank (`shimmerClimbSeconds`).
+    private var climbBufL: [Float] = []
+    private var climbBufR: [Float] = []
+    private var climbIdx = 0
+    private let climbFrames: Int
+
     // MARK: Pitch transposer (dual crossfaded taps over a ~93 ms window)
 
     private let psWindow: Int
@@ -97,6 +106,11 @@ public final class ShimmerReverb {
         self.pitchRatio = pow(2.0, Double(min(max(fx.shimmerPitch, -24), 24)) / 12.0)
         self.combFeedback = 0.78 + min(max(fx.shimmerSize, 0), 100) / 100 * 0.2
         self.damp = min(max(fx.shimmerDamping, 0), 100) / 100 * 0.6
+        self.climbFrames = Int(Double(min(max(fx.shimmerClimbSeconds, 0), 8)) * sampleRate)
+        if climbFrames > 0 {
+            climbBufL = [Float](repeating: 0, count: climbFrames)
+            climbBufR = [Float](repeating: 0, count: climbFrames)
+        }
 
         for t in Self.combTunings {
             combL.append([Float](repeating: 0, count: max(2, Int(Double(t) * scale))))
@@ -137,10 +151,23 @@ public final class ShimmerReverb {
             if dB >= Double(psWindow) { dB -= Double(psWindow) }
             let gA = Float(0.5 - 0.5 * cos(2 * Double.pi * dA / Double(psWindow)))
             let gB = 1 - gA
-            let shiftedL = tapRead(psBufL, delay: dA, mask: mask) * gA
+            var shiftedL = tapRead(psBufL, delay: dA, mask: mask) * gA
                          + tapRead(psBufL, delay: dB, mask: mask) * gB
-            let shiftedR = tapRead(psBufR, delay: dA, mask: mask) * gA
+            var shiftedR = tapRead(psBufR, delay: dA, mask: mask) * gA
                          + tapRead(psBufR, delay: dB, mask: mask) * gB
+
+            // --- Climb pre-delay: hold each pitched pass back so the bloom
+            // steps up at a controlled rate instead of instantly.
+            if climbFrames > 0 {
+                let delayedL = climbBufL[climbIdx]
+                let delayedR = climbBufR[climbIdx]
+                climbBufL[climbIdx] = shiftedL
+                climbBufR[climbIdx] = shiftedR
+                climbIdx += 1
+                if climbIdx >= climbFrames { climbIdx = 0 }
+                shiftedL = delayedL
+                shiftedR = delayedR
+            }
 
             // --- Tank input: dry mono + soft-clipped pitched feedback.
             let fbSig = tanhf((shiftedL + shiftedR) * 0.5 * feedback)

@@ -45,7 +45,17 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     // MARK: PaulStretch shaping
 
     /// Multi-pass layering for ``StretchMode/paulStretch``. See ``LayerPreset``.
+    /// Ignored when ``customLayers`` is set.
     public var layering: LayerPreset = .standard
+
+    /// A fully custom layer recipe for ``StretchMode/paulStretch``,
+    /// overriding ``layering`` when non-nil.
+    ///
+    /// Each ``StretchLayer`` sets its own duration scale, gain and pitch
+    /// offset — the way to control, for example, how fast a shimmer voice
+    /// evolves (raise the pitched layer's `scale` to slow it down). Start
+    /// from a built-in recipe via ``LayerPreset/layers``.
+    public var customLayers: [StretchLayer]? = nil
 
     /// The STFT window length, in seconds. Rounded up to a power-of-two
     /// frame count internally.
@@ -163,7 +173,7 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     // MARK: Codable
 
     private enum CodingKeys: String, CodingKey {
-        case mode, targetSeconds, maxStretch, layering, windowSeconds,
+        case mode, targetSeconds, maxStretch, layering, customLayers, windowSeconds,
              phaseRandomness, pitchSemitones, onsetSensitivity, tapeSpeed,
              reverse, stereoWidth, freezePosition, freezeSmear, freezeScan,
              grainSeconds, grainDensity, grainPositionJitter, grainTimeJitter,
@@ -180,6 +190,7 @@ public struct StretchParameters: Sendable, Codable, Equatable {
         targetSeconds = try c.decodeIfPresent(Double.self, forKey: .targetSeconds) ?? targetSeconds
         maxStretch = try c.decodeIfPresent(Double.self, forKey: .maxStretch) ?? maxStretch
         layering = try c.decodeIfPresent(LayerPreset.self, forKey: .layering) ?? layering
+        customLayers = try c.decodeIfPresent([StretchLayer].self, forKey: .customLayers) ?? customLayers
         windowSeconds = try c.decodeIfPresent(Double.self, forKey: .windowSeconds) ?? windowSeconds
         phaseRandomness = try c.decodeIfPresent(Double.self, forKey: .phaseRandomness) ?? phaseRandomness
         pitchSemitones = try c.decodeIfPresent(Double.self, forKey: .pitchSemitones) ?? pitchSemitones

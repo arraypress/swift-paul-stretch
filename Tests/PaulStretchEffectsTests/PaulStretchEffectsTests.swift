@@ -195,6 +195,28 @@ final class PaulStretchEffectsTests: XCTestCase {
         XCTAssertLessThan(peak, 4, "the feedback loop must stay stable")
     }
 
+    func testShimmerClimbDelaysTheBloom() {
+        let dry = tone(seconds: 1.0, hz: 440)
+        var instant = EffectsParameters()
+        instant.shimmerEnabled = true
+        instant.shimmerMix = 60
+        instant.shimmerFeedback = 65
+        var slow = instant
+        slow.shimmerClimbSeconds = 3
+
+        let fast = EffectsBaker.bake(dry, effects: instant)
+        let climbed = EffectsBaker.bake(dry, effects: slow)
+
+        // Octave energy right at the start of the input (first second):
+        // with a 3 s climb the first pitched pass hasn't re-entered yet.
+        let window = 4410..<44_100
+        let octaveFast = goertzelPower(fast.l[window], hz: 880, sampleRate: 44_100)
+        let octaveSlow = goertzelPower(climbed.l[window], hz: 880, sampleRate: 44_100)
+        XCTAssertLessThan(octaveSlow, octaveFast * 0.2,
+                          "a 3 s climb must hold the octave bloom back")
+        XCTAssertFalse(climbed.l.contains { $0.isNaN || $0.isInfinite })
+    }
+
     func testShimmerStreamingMatchesWholeBakeExactly() {
         // Shimmer is pure sequential DSP — chunking must not change a bit.
         let dry = tone(seconds: 1.0)

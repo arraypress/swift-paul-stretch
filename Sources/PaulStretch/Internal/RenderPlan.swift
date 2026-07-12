@@ -122,10 +122,10 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
         // Tape-slow caps the stretch ratio at 1 (no PaulStretch) — the
         // varispeed source is just tile-looped to fill the target.
         let effMaxStretch = p.mode == .tapeSlow ? 1.0 : p.maxStretch
-        let layered = (p.mode == .paulStretch && p.layering != .off)
-        let recipes: [(scale: Double, gain: Float, pitch: Double)] = layered
-            ? (p.layering.layers ?? [(1.0, 1.0, 0)])
-            : [(1.0, 1.0, 0)]
+        let custom = p.mode == .paulStretch ? (p.customLayers?.isEmpty == false ? p.customLayers : nil) : nil
+        let layered = custom != nil || (p.mode == .paulStretch && p.layering != .off)
+        let recipes: [StretchLayer] = custom
+            ?? (layered ? (p.layering.layers ?? [StretchLayer(gain: 1)]) : [StretchLayer(gain: 1)])
         let inputDur = src.duration
 
         var layers: [LayerPlan] = []
@@ -143,7 +143,7 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                                 ratio: ratio,
                                 windowSeconds: p.windowSeconds,
                                 phaseRandomness: p.phaseRandomness,
-                                pitchSemitones: p.pitchSemitones + recipe.pitch,
+                                pitchSemitones: p.pitchSemitones + recipe.pitchSemitones,
                                 onsetSensitivity: p.onsetSensitivity,
                                 seed: layerSeed,
                                 wrapInput: p.seamlessLoop)

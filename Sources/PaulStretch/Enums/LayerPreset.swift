@@ -43,17 +43,38 @@ public enum LayerPreset: String, CaseIterable, Sendable, Codable {
 
 extension LayerPreset {
 
-    /// The (duration scale, mix gain, pitch offset in semitones) recipe for
-    /// each preset, or `nil` for ``off`` (a single unscaled, unity-gain,
-    /// unshifted pass).
-    var layers: [(scale: Double, gain: Float, pitch: Double)]? {
+    /// The layer recipe for each preset, or `nil` for ``off`` (a single
+    /// unscaled, unity-gain, unshifted pass).
+    ///
+    /// Use these as starting points for
+    /// ``StretchParameters/customLayers`` — for example, slow a shimmer
+    /// voice down by raising the pitched layer's `scale`.
+    public var layers: [StretchLayer]? {
         switch self {
-        case .off:         return nil
-        case .subtle:      return [(0.7, 0.45, 0), (1.0, 0.75, 0), (1.4, 0.45, 0)]
-        case .standard:    return [(0.5, 0.55, 0), (1.0, 0.70, 0), (2.0, 0.50, 0)]
-        case .lush:        return [(0.25, 0.40, 0), (0.5, 0.55, 0), (1.0, 0.70, 0), (2.0, 0.55, 0), (4.0, 0.40, 0)]
-        case .shimmer:     return [(0.5, 0.55, 0), (1.0, 0.70, 0), (1.0, 0.45, 12)]
-        case .shimmerDeep: return [(0.5, 0.50, -12), (1.0, 0.70, 0), (1.0, 0.45, 12)]
+        case .off:
+            return nil
+        case .subtle:
+            return [StretchLayer(scale: 0.7, gain: 0.45),
+                    StretchLayer(scale: 1.0, gain: 0.75),
+                    StretchLayer(scale: 1.4, gain: 0.45)]
+        case .standard:
+            return [StretchLayer(scale: 0.5, gain: 0.55),
+                    StretchLayer(scale: 1.0, gain: 0.70),
+                    StretchLayer(scale: 2.0, gain: 0.50)]
+        case .lush:
+            return [StretchLayer(scale: 0.25, gain: 0.40),
+                    StretchLayer(scale: 0.5, gain: 0.55),
+                    StretchLayer(scale: 1.0, gain: 0.70),
+                    StretchLayer(scale: 2.0, gain: 0.55),
+                    StretchLayer(scale: 4.0, gain: 0.40)]
+        case .shimmer:
+            return [StretchLayer(scale: 0.5, gain: 0.55),
+                    StretchLayer(scale: 1.0, gain: 0.70),
+                    StretchLayer(scale: 1.0, gain: 0.45, pitchSemitones: 12)]
+        case .shimmerDeep:
+            return [StretchLayer(scale: 0.5, gain: 0.50, pitchSemitones: -12),
+                    StretchLayer(scale: 1.0, gain: 0.70),
+                    StretchLayer(scale: 1.0, gain: 0.45, pitchSemitones: 12)]
         }
     }
 }

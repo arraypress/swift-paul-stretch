@@ -77,11 +77,34 @@ final class NewModesTests: XCTestCase {
     func testShimmerPresetsExposeRecipes() {
         XCTAssertEqual(LayerPreset.allCases.count, 6)
         XCTAssertEqual(LayerPreset.shimmer.layers?.count, 3)
-        XCTAssertTrue(LayerPreset.shimmer.layers?.contains { $0.pitch == 12 } ?? false)
-        XCTAssertTrue(LayerPreset.shimmerDeep.layers?.contains { $0.pitch == -12 } ?? false)
+        XCTAssertTrue(LayerPreset.shimmer.layers?.contains { $0.pitchSemitones == 12 } ?? false)
+        XCTAssertTrue(LayerPreset.shimmerDeep.layers?.contains { $0.pitchSemitones == -12 } ?? false)
         // Legacy presets must stay unshifted (bit-compatibility).
-        XCTAssertTrue(LayerPreset.standard.layers?.allSatisfy { $0.pitch == 0 } ?? false)
-        XCTAssertTrue(LayerPreset.lush.layers?.allSatisfy { $0.pitch == 0 } ?? false)
+        XCTAssertTrue(LayerPreset.standard.layers?.allSatisfy { $0.pitchSemitones == 0 } ?? false)
+        XCTAssertTrue(LayerPreset.lush.layers?.allSatisfy { $0.pitchSemitones == 0 } ?? false)
+    }
+
+    func testCustomLayersOverrideThePreset() throws {
+        let source = TestSignals.sine(220, seconds: 1.2)
+        // A hand-built shimmer whose octave voice runs at half speed
+        // (double duration scale) — the "shimmer speed" control.
+        var p = params()
+        p.customLayers = [
+            StretchLayer(scale: 1.0, gain: 0.70),
+            StretchLayer(scale: 2.0, gain: 0.45, pitchSemitones: 12),
+        ]
+        let out = StretchRenderer.render(source, parameters: p, isCancelled: { false })
+        XCTAssertEqual(out.duration, 4, accuracy: 0.01)
+        let octave = toneEnergyShare(out, hz: 440, atFrame: out.frameCount / 2)
+        XCTAssertGreaterThan(octave, 0.05, "custom pitched layer must contribute octave energy")
+
+        // Custom layers must survive JSON (presets).
+        let decoded = try JSONDecoder().decode(StretchParameters.self,
+                                               from: JSONEncoder().encode(p))
+        XCTAssertEqual(decoded.customLayers, p.customLayers)
+        // …and legacy JSON without the key decodes to nil.
+        XCTAssertNil(try JSONDecoder().decode(StretchParameters.self,
+                                              from: Data("{}".utf8)).customLayers)
     }
 
     // MARK: - Scanning freeze
@@ -274,6 +297,11 @@ final class NewModesTests: XCTestCase {
             ("granular", params { $0.mode = .granularCloud; $0.grainPitchSpread = 5 }),
             ("granular-loop", params { $0.mode = .granularCloud; $0.seamlessLoop = true }),
             ("granular-grid", params { $0.mode = .granularCloud; $0.grainTimeJitter = 0 }),
+            ("custom-layers-loop", params {
+                $0.customLayers = [StretchLayer(scale: 1.0, gain: 0.7),
+                                   StretchLayer(scale: 2.0, gain: 0.45, pitchSemitones: 12)]
+                $0.seamlessLoop = true
+            }),
         ]
         for (name, p) in matrix {
             let full = StretchRenderer.render(source, parameters: p, isCancelled: { false })

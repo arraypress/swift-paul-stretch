@@ -106,6 +106,14 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// High-frequency damping inside the tank, `0…100`.
     public var shimmerDamping: Float = 40
 
+    /// The climb rate of the shimmer, in seconds per octave step (`0…8`).
+    ///
+    /// A pre-delay in the pitched feedback path: each pass through the loop
+    /// waits this long before re-entering the tank, so the bloom steps up
+    /// audibly — `0` (the default) is the classic dense instant halo,
+    /// `1`–`3` s turns it into a slow, deliberate ascent.
+    public var shimmerClimbSeconds: Float = 0
+
     /// `true` when at least one effect is enabled — baking with everything
     /// off is a no-op and returns the dry audio untouched.
     public var isAnyEnabled: Bool {
@@ -123,7 +131,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case filterEnabled, filterCutoff, filterResonance
         case delayEnabled, delayTime, delayFeedback, delayMix
         case shimmerEnabled, shimmerMix, shimmerPitch, shimmerFeedback,
-             shimmerSize, shimmerDamping
+             shimmerSize, shimmerDamping, shimmerClimbSeconds
     }
 
     /// Tolerant decoding: any field missing from the JSON (a preset saved
@@ -151,6 +159,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         shimmerFeedback = try c.decodeIfPresent(Float.self, forKey: .shimmerFeedback) ?? shimmerFeedback
         shimmerSize = try c.decodeIfPresent(Float.self, forKey: .shimmerSize) ?? shimmerSize
         shimmerDamping = try c.decodeIfPresent(Float.self, forKey: .shimmerDamping) ?? shimmerDamping
+        shimmerClimbSeconds = try c.decodeIfPresent(Float.self, forKey: .shimmerClimbSeconds) ?? shimmerClimbSeconds
     }
 }
 
