@@ -53,7 +53,7 @@ public enum EffectsBaker {
             let ring = shimmer.tail()
             working = StereoBuffer(l: wet.l + ring.l, r: wet.r + ring.r, sampleRate: sr)
         }
-        let stockActive = fx.reverbEnabled || fx.eqEnabled || fx.filterEnabled || fx.delayEnabled
+        let stockActive = fx.isStockChainEnabled
         guard stockActive else { return working }
         let input = working
 

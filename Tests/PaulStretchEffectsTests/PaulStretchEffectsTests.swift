@@ -272,6 +272,148 @@ final class PaulStretchEffectsTests: XCTestCase {
         XCTAssertEqual(decoded.shimmerPitch, 12)
     }
 
+    // MARK: - Extended fixed chain (distortion / compressor / limiter)
+
+    func testDistortionBakeMangles() {
+        let dry = tone()
+        var fx = EffectsParameters()
+        fx.distortionEnabled = true
+        fx.distortionPreset = .multiDecimated2
+        fx.distortionMix = 100
+        let wet = EffectsBaker.bake(dry, effects: fx)
+        XCTAssertEqual(wet.frameCount, dry.frameCount, "distortion adds no tail")
+        XCTAssertNotEqual(Array(wet.l[4410..<44100]), Array(dry.l[4410..<44100]),
+                          "distortion must change the signal")
+        XCTAssertFalse(wet.l.contains { $0.isNaN })
+        XCTAssertEqual(DistortionPreset.allCases.count, 22)
+    }
+
+    func testCompressorReducesCrestFactor() {
+        // Bursty input: loud attack, quiet tail — compression narrows the gap.
+        let sr = 44_100.0
+        let n = Int(sr * 1.0)
+        var l = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let t = Double(i) / sr
+            let env: Double = t < 0.2 ? 0.9 : 0.08
+            l[i] = Float(env * sin(2 * Double.pi * 330 * t))
+        }
+        let dry = StereoBuffer(l: l, r: l, sampleRate: sr)
+
+        var fx = EffectsParameters()
+        fx.compressorEnabled = true
+        fx.compressorThreshold = -30
+        fx.compressorHeadroom = 0.5     // low headroom = hard compression
+        fx.compressorAttack = 0.001
+        fx.compressorGain = 0
+        let wet = EffectsBaker.bake(dry, effects: fx)
+
+        // Compression narrows the level gap between the sustained loud body
+        // (post-attack) and the quiet tail.
+        let loud = Int(0.05 * sr)..<Int(0.15 * sr)
+        let quiet = Int(0.5 * sr)..<Int(0.9 * sr)
+        let dryRatio = rms(dry.l[loud]) / max(rms(dry.l[quiet]), 1e-9)
+        let wetRatio = rms(wet.l[loud]) / max(rms(wet.l[quiet]), 1e-9)
+        XCTAssertLessThan(wetRatio, dryRatio * 0.7,
+                          "hard compression must narrow the loud/quiet gap")
+    }
+
+    func testLimiterCapsHotPeaks() {
+        let dry = tone()   // 0.4 peak
+        var fx = EffectsParameters()
+        fx.limiterEnabled = true
+        fx.limiterPreGain = 20          // drive it ~4 over full scale
+        let wet = EffectsBaker.bake(dry, effects: fx)
+        let peak = wet.l.reduce(Float(0)) { max($0, abs($1)) }
+        XCTAssertLessThan(peak, 1.2, "the limiter must hold +20 dB drive near the ceiling")
+        XCTAssertGreaterThan(peak, 0.5, "…while clearly louder than the dry 0.4 peak")
+    }
+
+    func testDelayLowPassDarkensEchoes() {
+        let dry = tone(seconds: 0.3, hz: 6000)   // bright tone
+        var open = EffectsParameters()
+        open.delayEnabled = true
+        open.delayTime = 0.2
+        open.delayMix = 100
+        open.delayFeedback = 0
+        open.delayLowPassCutoff = 20_000
+        var dark = open
+        dark.delayLowPassCutoff = 500
+
+        let wetOpen = EffectsBaker.bake(dry, effects: open)
+        let wetDark = EffectsBaker.bake(dry, effects: dark)
+        // The echo lands ~0.2 s in; compare its energy.
+        let echo = Int(0.22 * 44_100)..<Int(0.42 * 44_100)
+        XCTAssertLessThan(rms(wetDark.l[echo]), rms(wetOpen.l[echo]) * 0.5,
+                          "a 500 Hz feedback low-pass must gut a 6 kHz echo")
+    }
+
+    // MARK: - The full Apple rack
+
+    func testRackBakesEveryUnitType() {
+        let dry = tone(seconds: 0.5)
+        let everything: [AppleEffect] = [
+            .eq(EQSettings(bands: [
+                EQBandSettings(type: .highPass, frequency: 60),
+                EQBandSettings(type: .parametric, frequency: 2000, bandwidth: 0.8, gain: 2),
+                EQBandSettings(type: .highShelf, frequency: 8000, gain: -3),
+            ])),
+            .graphicEQ(GraphicEQSettings(use31Bands: false, bandGains: [3, 2, 1, 0, 0, 0, 0, -1, -2, -3])),
+            .distortion(DistortionSettings(preset: .multiDecimated1, wetDryMix: 20)),
+            .delay(DelaySettings(delayTime: 0.1, feedback: 20, wetDryMix: 20)),
+            .reverb(ReverbSettings(preset: .mediumHall2, wetDryMix: 30)),
+            .dynamics(DynamicsProcessorSettings(threshold: -20, headRoom: 3)),
+            .multibandCompressor(MultibandCompressorSettings()),
+            .peakLimiter(PeakLimiterSettings()),
+        ]
+        let wet = EffectRack.bake(dry, effects: everything)
+        XCTAssertEqual(wet.frameCount,
+                       dry.frameCount + Int(44_100 * EffectsBaker.tailSeconds),
+                       "reverb/delay in the rack must append the tail")
+        XCTAssertNotEqual(Array(wet.l[0..<dry.frameCount]), dry.l)
+        XCTAssertFalse(wet.l.contains { $0.isNaN })
+        XCTAssertGreaterThan(rms(wet.l[0...]), 1e-4)
+    }
+
+    func testRackTimeUnitsScaleDuration() {
+        let dry = tone(seconds: 1.0)
+        // TimePitch at rate 2 → half duration, pitch preserved.
+        let fast = EffectRack.bake(dry, effects: [.timePitch(TimePitchSettings(rate: 2))])
+        XCTAssertEqual(Double(fast.frameCount), Double(dry.frameCount) / 2,
+                       accuracy: 4096, "rate 2 must halve the duration")
+
+        // Varispeed at rate 0.5 → double duration, pitch drops an octave.
+        let slow = EffectRack.bake(dry, effects: [.varispeed(VarispeedSettings(rate: 0.5))])
+        XCTAssertEqual(Double(slow.frameCount), Double(dry.frameCount) * 2,
+                       accuracy: 4096, "rate 0.5 must double the duration")
+        var crossings = 0
+        for i in 1..<slow.frameCount where (slow.l[i - 1] < 0) != (slow.l[i] < 0) { crossings += 1 }
+        let hz = Double(crossings) / (2 * Double(slow.frameCount) / 44_100)
+        XCTAssertEqual(hz, 220, accuracy: 12, "varispeed 0.5 must halve the pitch of 440 Hz")
+    }
+
+    func testRackRoundTripsThroughJSON() throws {
+        let rack: [AppleEffect] = [
+            .timePitch(TimePitchSettings(rate: 0.5, pitchCents: 700)),
+            .eq(EQSettings(bands: [EQBandSettings(type: .resonantLowPass, frequency: 900, gain: 6)])),
+            .multibandCompressor(MultibandCompressorSettings()),
+            .peakLimiter(PeakLimiterSettings(preGain: 3)),
+        ]
+        let decoded = try JSONDecoder().decode([AppleEffect].self,
+                                               from: JSONEncoder().encode(rack))
+        XCTAssertEqual(decoded, rack)
+    }
+
+    func testRackUpdateParametersRequiresSameTopology() {
+        let rack = EffectRack(effects: [.reverb(ReverbSettings()), .peakLimiter(PeakLimiterSettings())])
+        XCTAssertTrue(rack.updateParameters([.reverb(ReverbSettings(preset: .plate, wetDryMix: 80)),
+                                             .peakLimiter(PeakLimiterSettings(preGain: 6))]))
+        XCTAssertFalse(rack.updateParameters([.delay(DelaySettings()), .peakLimiter(PeakLimiterSettings())]),
+                       "a different unit sequence must be rejected")
+        XCTAssertFalse(rack.updateParameters([.reverb(ReverbSettings())]),
+                       "a different unit count must be rejected")
+    }
+
     // MARK: - Settings
 
     func testEffectsParametersRoundTripThroughJSON() throws {
@@ -286,7 +428,12 @@ final class PaulStretchEffectsTests: XCTestCase {
     }
 
     func testReverbPresetsExposeDisplayNamesAndAVPresets() {
-        XCTAssertEqual(ReverbPreset.allCases.count, 8)
+        XCTAssertEqual(ReverbPreset.allCases.count, 13)
+        // The first eight positions are load-bearing (legacy integer-index
+        // preset migration) — never reorder them.
+        XCTAssertEqual(Array(ReverbPreset.allCases.prefix(8)),
+                       [.smallRoom, .mediumRoom, .largeRoom, .mediumHall,
+                        .largeHall, .plate, .cathedral, .largeChamber])
         XCTAssertEqual(ReverbPreset.cathedral.displayName, "Cathedral")
         XCTAssertEqual(ReverbPreset.largeChamber.avPreset, .largeChamber)
         XCTAssertFalse(EffectsParameters().isAnyEnabled)

@@ -78,8 +78,7 @@ public final class StreamingEffectsBaker {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return nil }
         self.format = format
         self.passthrough = !effects.isAnyEnabled
-        self.stockActive = effects.reverbEnabled || effects.eqEnabled
-            || effects.filterEnabled || effects.delayEnabled
+        self.stockActive = effects.isStockChainEnabled
         self.tailSeconds = (effects.shimmerEnabled ? ShimmerReverb.tailSeconds : 0)
             + ((effects.reverbEnabled || effects.delayEnabled) ? EffectsBaker.tailSeconds : 0)
         if effects.shimmerEnabled {

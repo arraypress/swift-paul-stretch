@@ -77,6 +77,70 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// Delay wet/dry mix, `0…100`.
     public var delayMix: Float = 25
 
+    /// Low-pass cutoff inside the delay's feedback path, in hertz
+    /// (`10…22050`) — darkens each successive echo.
+    public var delayLowPassCutoff: Float = 8000
+
+    // MARK: Distortion
+
+    /// Whether the distortion is active.
+    public var distortionEnabled = false
+
+    /// The distortion character. See ``DistortionPreset`` for all 22
+    /// factory presets.
+    public var distortionPreset: DistortionPreset = .multiDecimated1
+
+    /// Gain applied before the distortion stage, in decibels (`-80…20`) —
+    /// the drive control.
+    public var distortionPreGain: Float = -6
+
+    /// Distortion wet/dry mix, `0…100`.
+    public var distortionMix: Float = 50
+
+    // MARK: Dynamics processor (compressor/expander)
+
+    /// Whether the compressor is active.
+    public var compressorEnabled = false
+
+    /// Compression threshold, in decibels (`-40…20`).
+    public var compressorThreshold: Float = -20
+
+    /// Headroom above the threshold, in decibels (`0.1…40`). **Lower**
+    /// headroom means **harder** compression — Apple's dynamics processor
+    /// derives the ratio from this rather than exposing one directly.
+    public var compressorHeadroom: Float = 5
+
+    /// Expansion ratio below the expansion threshold (`1…50`). `1` disables
+    /// downward expansion.
+    public var compressorExpansionRatio: Float = 1
+
+    /// Expansion threshold, in decibels.
+    public var compressorExpansionThreshold: Float = -100
+
+    /// Attack time, in seconds (`0.0001…0.2`).
+    public var compressorAttack: Float = 0.01
+
+    /// Release time, in seconds (`0.01…3`).
+    public var compressorRelease: Float = 0.25
+
+    /// Make-up gain after compression, in decibels (`-40…40`).
+    public var compressorGain: Float = 0
+
+    // MARK: Peak limiter
+
+    /// Whether the peak limiter is active (last in the chain — a safety
+    /// ceiling for hot mixes).
+    public var limiterEnabled = false
+
+    /// Gain applied before limiting, in decibels (`-40…40`).
+    public var limiterPreGain: Float = 0
+
+    /// Attack time, in seconds (`0.001…0.03`).
+    public var limiterAttack: Float = 0.012
+
+    /// Decay time, in seconds (`0.001…0.06`).
+    public var limiterDecay: Float = 0.024
+
     // MARK: Shimmer reverb
 
     /// Whether the shimmer reverb is active.
@@ -114,10 +178,17 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// `1`–`3` s turns it into a slow, deliberate ascent.
     public var shimmerClimbSeconds: Float = 0
 
+    /// `true` when any effect on the stock `AVAudioUnit` chain is enabled
+    /// (everything except the shimmer, which is the library's own DSP).
+    public var isStockChainEnabled: Bool {
+        reverbEnabled || eqEnabled || filterEnabled || delayEnabled
+            || distortionEnabled || compressorEnabled || limiterEnabled
+    }
+
     /// `true` when at least one effect is enabled — baking with everything
     /// off is a no-op and returns the dry audio untouched.
     public var isAnyEnabled: Bool {
-        reverbEnabled || eqEnabled || filterEnabled || delayEnabled || shimmerEnabled
+        isStockChainEnabled || shimmerEnabled
     }
 
     /// Creates the all-off default settings.
@@ -129,7 +200,12 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case reverbEnabled, reverbPreset, reverbMix
         case eqEnabled, eqLowGain, eqMidGain, eqHighGain
         case filterEnabled, filterCutoff, filterResonance
-        case delayEnabled, delayTime, delayFeedback, delayMix
+        case delayEnabled, delayTime, delayFeedback, delayMix, delayLowPassCutoff
+        case distortionEnabled, distortionPreset, distortionPreGain, distortionMix
+        case compressorEnabled, compressorThreshold, compressorHeadroom,
+             compressorExpansionRatio, compressorExpansionThreshold,
+             compressorAttack, compressorRelease, compressorGain
+        case limiterEnabled, limiterPreGain, limiterAttack, limiterDecay
         case shimmerEnabled, shimmerMix, shimmerPitch, shimmerFeedback,
              shimmerSize, shimmerDamping, shimmerClimbSeconds
     }
@@ -153,6 +229,23 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         delayTime = try c.decodeIfPresent(Float.self, forKey: .delayTime) ?? delayTime
         delayFeedback = try c.decodeIfPresent(Float.self, forKey: .delayFeedback) ?? delayFeedback
         delayMix = try c.decodeIfPresent(Float.self, forKey: .delayMix) ?? delayMix
+        delayLowPassCutoff = try c.decodeIfPresent(Float.self, forKey: .delayLowPassCutoff) ?? delayLowPassCutoff
+        distortionEnabled = try c.decodeIfPresent(Bool.self, forKey: .distortionEnabled) ?? distortionEnabled
+        distortionPreset = try c.decodeIfPresent(DistortionPreset.self, forKey: .distortionPreset) ?? distortionPreset
+        distortionPreGain = try c.decodeIfPresent(Float.self, forKey: .distortionPreGain) ?? distortionPreGain
+        distortionMix = try c.decodeIfPresent(Float.self, forKey: .distortionMix) ?? distortionMix
+        compressorEnabled = try c.decodeIfPresent(Bool.self, forKey: .compressorEnabled) ?? compressorEnabled
+        compressorThreshold = try c.decodeIfPresent(Float.self, forKey: .compressorThreshold) ?? compressorThreshold
+        compressorHeadroom = try c.decodeIfPresent(Float.self, forKey: .compressorHeadroom) ?? compressorHeadroom
+        compressorExpansionRatio = try c.decodeIfPresent(Float.self, forKey: .compressorExpansionRatio) ?? compressorExpansionRatio
+        compressorExpansionThreshold = try c.decodeIfPresent(Float.self, forKey: .compressorExpansionThreshold) ?? compressorExpansionThreshold
+        compressorAttack = try c.decodeIfPresent(Float.self, forKey: .compressorAttack) ?? compressorAttack
+        compressorRelease = try c.decodeIfPresent(Float.self, forKey: .compressorRelease) ?? compressorRelease
+        compressorGain = try c.decodeIfPresent(Float.self, forKey: .compressorGain) ?? compressorGain
+        limiterEnabled = try c.decodeIfPresent(Bool.self, forKey: .limiterEnabled) ?? limiterEnabled
+        limiterPreGain = try c.decodeIfPresent(Float.self, forKey: .limiterPreGain) ?? limiterPreGain
+        limiterAttack = try c.decodeIfPresent(Float.self, forKey: .limiterAttack) ?? limiterAttack
+        limiterDecay = try c.decodeIfPresent(Float.self, forKey: .limiterDecay) ?? limiterDecay
         shimmerEnabled = try c.decodeIfPresent(Bool.self, forKey: .shimmerEnabled) ?? shimmerEnabled
         shimmerMix = try c.decodeIfPresent(Float.self, forKey: .shimmerMix) ?? shimmerMix
         shimmerPitch = try c.decodeIfPresent(Float.self, forKey: .shimmerPitch) ?? shimmerPitch

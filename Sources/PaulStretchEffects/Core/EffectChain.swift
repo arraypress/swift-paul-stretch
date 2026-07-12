@@ -9,6 +9,7 @@
 //
 
 import AVFoundation
+import AudioToolbox
 import PaulStretch
 
 // The AVAudioUnit effect classes do not exist on watchOS — this product
@@ -39,8 +40,32 @@ public final class EffectChain {
     /// Stereo delay.
     public let delay = AVAudioUnitDelay()
 
+    /// Distortion (factory presets — see ``DistortionPreset``).
+    public let distortion = AVAudioUnitDistortion()
+
     /// Reverb (factory presets — see ``ReverbPreset``).
     public let reverb = AVAudioUnitReverb()
+
+    /// Apple's dynamics processor (compressor/expander), wrapped from
+    /// AudioToolbox — AVFAudio has no native class for it.
+    public let dynamics = EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_DynamicsProcessor)
+
+    /// Apple's peak limiter, wrapped from AudioToolbox.
+    public let limiter = EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_PeakLimiter)
+
+    /// Instantiates an Apple AudioToolbox effect by subtype.
+    static func makeAudioToolboxEffect(_ subType: OSType) -> AVAudioUnitEffect {
+        AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: subType,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0, componentFlagsMask: 0))
+    }
+
+    /// Sets a global-scope parameter on an AudioToolbox-backed unit.
+    static func setParameter(_ unit: AVAudioUnitEffect, _ id: AudioUnitParameterID, _ value: Float) {
+        AudioUnitSetParameter(unit.audioUnit, id, kAudioUnitScope_Global, 0, value, 0)
+    }
 
     /// Creates a chain with all nodes unattached.
     public init() {}
@@ -55,12 +80,17 @@ public final class EffectChain {
     ///   - format: The connection format.
     public func install(in engine: AVAudioEngine, from source: AVAudioNode,
                         to dest: AVAudioNode, format: AVAudioFormat) {
-        for n in [filter, eq, delay, reverb] as [AVAudioNode] { engine.attach(n) }
+        for n in [filter, eq, distortion, delay, reverb, dynamics, limiter] as [AVAudioNode] {
+            engine.attach(n)
+        }
         engine.connect(source, to: filter, format: format)
         engine.connect(filter, to: eq, format: format)
-        engine.connect(eq, to: delay, format: format)
+        engine.connect(eq, to: distortion, format: format)
+        engine.connect(distortion, to: delay, format: format)
         engine.connect(delay, to: reverb, format: format)
-        engine.connect(reverb, to: dest, format: format)
+        engine.connect(reverb, to: dynamics, format: format)
+        engine.connect(dynamics, to: limiter, format: format)
+        engine.connect(limiter, to: dest, format: format)
     }
 
     /// Pushes a parameter set into the chain. Safe to call while audio runs.
@@ -85,14 +115,36 @@ public final class EffectChain {
         // Delay
         delay.delayTime = TimeInterval(max(0, fx.delayTime))
         delay.feedback = max(-100, min(fx.delayFeedback, 100))
-        delay.lowPassCutoff = 8000
+        delay.lowPassCutoff = max(10, min(fx.delayLowPassCutoff, 22_050))
         delay.wetDryMix = fx.delayEnabled ? max(0, min(fx.delayMix, 100)) : 0
         delay.bypass = !fx.delayEnabled
+
+        // Distortion
+        distortion.loadFactoryPreset(fx.distortionPreset.avPreset)
+        distortion.preGain = max(-80, min(fx.distortionPreGain, 20))
+        distortion.wetDryMix = fx.distortionEnabled ? max(0, min(fx.distortionMix, 100)) : 0
+        distortion.bypass = !fx.distortionEnabled
 
         // Reverb
         reverb.loadFactoryPreset(fx.reverbPreset.avPreset)
         reverb.wetDryMix = fx.reverbEnabled ? max(0, min(fx.reverbMix, 100)) : 0
         reverb.bypass = !fx.reverbEnabled
+
+        // Dynamics processor (parameter IDs from AudioUnitParameters.h)
+        Self.setParameter(dynamics, kDynamicsProcessorParam_Threshold, max(-40, min(fx.compressorThreshold, 20)))
+        Self.setParameter(dynamics, kDynamicsProcessorParam_HeadRoom, max(0.1, min(fx.compressorHeadroom, 40)))
+        Self.setParameter(dynamics, kDynamicsProcessorParam_ExpansionRatio, max(1, min(fx.compressorExpansionRatio, 50)))
+        Self.setParameter(dynamics, kDynamicsProcessorParam_ExpansionThreshold, fx.compressorExpansionThreshold)
+        Self.setParameter(dynamics, kDynamicsProcessorParam_AttackTime, max(0.0001, min(fx.compressorAttack, 0.2)))
+        Self.setParameter(dynamics, kDynamicsProcessorParam_ReleaseTime, max(0.01, min(fx.compressorRelease, 3)))
+        Self.setParameter(dynamics, kDynamicsProcessorParam_OverallGain, max(-40, min(fx.compressorGain, 40)))
+        dynamics.bypass = !fx.compressorEnabled
+
+        // Peak limiter
+        Self.setParameter(limiter, kLimiterParam_AttackTime, max(0.001, min(fx.limiterAttack, 0.03)))
+        Self.setParameter(limiter, kLimiterParam_DecayTime, max(0.001, min(fx.limiterDecay, 0.06)))
+        Self.setParameter(limiter, kLimiterParam_PreGain, max(-40, min(fx.limiterPreGain, 40)))
+        limiter.bypass = !fx.limiterEnabled
     }
 }
 
