@@ -104,6 +104,29 @@ public enum AudioFileIO {
         try write(buffer, to: url, format: .wav(bitDepth: bitDepth))
     }
 
+    /// Decodes in-memory encoded audio bytes (any AVFoundation-readable
+    /// format) to a stereo buffer at the requested sample rate.
+    ///
+    /// AVFoundation only decodes from URLs, so the bytes take a round trip
+    /// through a temporary file. Use this for audio that travels *inside*
+    /// documents — embedded impulse responses, session sample sources.
+    ///
+    /// - Parameters:
+    ///   - data: The encoded audio bytes (WAV, AIFF, M4A, MP3…).
+    ///   - sampleRate: The sample rate to decode/resample to, in hertz.
+    /// - Returns: The decoded audio, or `nil` when the bytes don't decode.
+    public static func decodeStereo(_ data: Data, sampleRate: Double) -> StereoBuffer? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ps-embedded-\(data.hashValue).audio")
+        do {
+            try data.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            return try readStereo(url: url, sampleRate: sampleRate)
+        } catch {
+            return nil
+        }
+    }
+
     /// Builds a deinterleaved float `AVAudioPCMBuffer` from a stereo buffer,
     /// ready to schedule on an `AVAudioPlayerNode`.
     ///

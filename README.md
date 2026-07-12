@@ -286,6 +286,65 @@ let halo = EffectsBaker.bake(drone, effects: fx)
 try StretchRenderer.renderToWAVFile(source, parameters: params, effects: fx, url: exportURL)
 ```
 
+### Channel-strip effect stacks (PaulStretchEffects)
+
+`EffectStack` is the Ableton-style device model: an ordered, reorderable
+chain of `EffectDevice`s — each one effect with its own settings and bypass,
+duplicates welcome. The library's pure-DSP devices and the whole Apple
+palette share one stack, and `EffectStackBaker` honours the order exactly
+(consecutive Apple devices group into a single offline pass).
+
+```swift
+var strip = EffectStack([
+    EffectDevice(.sweepFilter(filter)),        // darken the send…
+    EffectDevice(.shimmer(shimmer)),           // …bloom it…
+    EffectDevice(.convolutionReverb(space)),   // …then place it in a room
+    EffectDevice(.apple(.peakLimiter(.init()))),
+])
+strip.move(fromIndex: 0, toIndex: 2)           // filter the tail instead
+let wet = EffectStackBaker.bake(dry, stack: strip)
+// strip.signature — cache key: re-bake playback when (and only when) it changes
+```
+
+### Ambient sessions (PaulStretchSession)
+
+A time-based multitrack model for generative ambient — the ruler is
+seconds, not bars. Each `Track` holds one voice (a sample loop or a
+generative engine), its own `EffectStack`, gain/pan with session-length
+automation lanes, and its own loop length: loops of *different* lengths
+phase against each other endlessly (the tape-loop model behind *Music for
+Airports*). Everything is deterministic — the same session bounces the
+identical file.
+
+```swift
+import PaulStretchSession
+
+var session = Session()
+session.durationSeconds = 1800                          // a 30-minute piece
+
+var piano = Track(name: "piano drone",
+                  source: .generative(GenerativeSource(audio: .init(path: noteURL.path),
+                                                       parameters: droneParams, seed: 3)))
+piano.stack = EffectStack([EffectDevice(.shimmer(shimmer))])
+
+var field = Track(name: "field recording",
+                  source: .sample(SampleSource(audio: .init(path: rainURL.path))))
+field.loopPhaseSeconds = 13                              // enter mid-loop
+field.gainLane = AutomationLane(points: [AutomationPoint(t: 0, v: 0.2),
+                                         AutomationPoint(t: 1, v: 0.9)])
+
+session.tracks = [piano, field]
+session.master = EffectStack([EffectDevice(.convolutionReverb(hall))])
+
+let mix = try SessionRenderer.render(session)            // deterministic bounce
+try AudioFileIO.write(mix, to: outURL, format: .aac256)
+
+// Live: render voices once (cache by SessionRenderer.voiceCacheKey), then
+let mixer = SessionMixer()                               // sample-locked transport
+mixer.prepare(session: session, voices: voices)
+mixer.play(from: 0)                                      // gain/pan/mute/solo live
+```
+
 ### Playing renders (PaulStretchEffects)
 
 `StretchPlayer` is the playback half of a host app: load a render, scrub it,
@@ -386,7 +445,7 @@ exists for exactly this.
 swift test -c release
 ```
 
-130 tests cover FFT correctness against a scalar oracle, determinism, every
+145 tests cover FFT correctness against a scalar oracle, determinism, every
 `StereoBuffer` transform, all pipeline modes, file I/O round trips and the
 effects bakers. The load-bearing suite asserts that chunked output is
 **bit-identical** to in-memory output across the full mode matrix and

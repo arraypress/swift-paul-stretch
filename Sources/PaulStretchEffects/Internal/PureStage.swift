@@ -106,18 +106,9 @@ func makePureStages(sampleRate: Double,
     return stages
 }
 
-/// Decodes embedded impulse-response bytes at the stream's sample rate
-/// (via a temp file — AVFoundation only decodes from URLs).
+/// Decodes embedded impulse-response bytes at the stream's sample rate.
 func decodeImpulse(_ data: Data, sampleRate: Double) -> StereoBuffer? {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("ps-ir-\(data.hashValue).audio")
-    do {
-        try data.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
-        return try AudioFileIO.readStereo(url: url, sampleRate: sampleRate)
-    } catch {
-        return nil
-    }
+    AudioFileIO.decodeStereo(data, sampleRate: sampleRate)
 }
 
 /// Runs a whole buffer through a stage list, appending each stage's
