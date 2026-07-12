@@ -40,6 +40,13 @@ memory, so an hour-long export never has to exist in RAM.
   timeline just-in-time on a background thread and plays it through an
   `AVAudioSourceNode`: endless looped ambience with **zero pre-render** and
   a few megabytes of lookahead, for all three engines.
+- ▶️ **Drop-in buffer player** — `StretchPlayer` (PaulStretchEffects) plays
+  rendered `StereoBuffer`s with seek, pause, region-looping, the live stock
+  effect chain and a built-in spectrum tap — observable from SwiftUI, with
+  the `AVAudioPlayerNode` completion-handler races already handled.
+- 📊 **Display helpers** — `SpectrumAnalyzer` folds engine-tap buffers into
+  smoothed log-band meter values; `StereoBuffer.peaks(columns:)` produces
+  waveform-view peak columns.
 - ⏳ **async/await throughout** — `try await` renders that honour `Task`
   cancellation, plus a pull-based `AsyncSequence` of chunks with natural
   backpressure.
@@ -279,6 +286,33 @@ let halo = EffectsBaker.bake(drone, effects: fx)
 try StretchRenderer.renderToWAVFile(source, parameters: params, effects: fx, url: exportURL)
 ```
 
+### Playing renders (PaulStretchEffects)
+
+`StretchPlayer` is the playback half of a host app: load a render, scrub it,
+loop a region, and tweak the stock chain live. Its published `isPlaying` /
+`currentTime` / `duration` / `spectrum` drive SwiftUI directly.
+
+```swift
+@StateObject var player = StretchPlayer()
+
+player.load(render, loop: true)      // or region: 2.0...6.5
+player.setEffects(fx)                // live stock chain on top
+player.play()
+player.seek(to: 30)
+```
+
+The pure-DSP stages (shimmer, convolution reverb, sweep filter, wow, pump,
+auto-pan) can't run on a live graph — bake them with
+`EffectsBaker.bakePureStages(_:effects:)` and reload the player when
+`fx.pureDSPSignature` changes:
+
+```swift
+if fx.pureDSPSignature != lastBakedSignature {
+    lastBakedSignature = fx.pureDSPSignature
+    player.load(EffectsBaker.bakePureStages(dry, effects: fx), loop: true)
+}
+```
+
 ### Cancellation and progress
 
 Every render takes an `isCancelled` closure (poll-based, thread-safe with the
@@ -352,7 +386,7 @@ exists for exactly this.
 swift test -c release
 ```
 
-57 tests cover FFT correctness against a scalar oracle, determinism, every
+130 tests cover FFT correctness against a scalar oracle, determinism, every
 `StereoBuffer` transform, all pipeline modes, file I/O round trips and the
 effects bakers. The load-bearing suite asserts that chunked output is
 **bit-identical** to in-memory output across the full mode matrix and

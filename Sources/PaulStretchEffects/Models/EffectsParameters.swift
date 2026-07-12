@@ -296,6 +296,36 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         isStockChainEnabled || isPureDSPEnabled
     }
 
+    /// A cache key over exactly the settings that change the *baked*
+    /// pure-DSP output — shimmer, convolution reverb (including a custom
+    /// impulse), sweep filter, wow, pump, auto-pan and the automation lanes.
+    ///
+    /// Hosts that bake the pure-DSP stages into a playback buffer should
+    /// re-bake when (and only when) this string changes; live stock-chain
+    /// fields are deliberately excluded so tweaking the EQ never triggers a
+    /// rebake. Owning the key here means it can never drift out of sync
+    /// with the parameter set the way a hand-maintained copy can.
+    ///
+    /// Compare within a single process only — embedded impulse bytes are
+    /// folded in via `hashValue`, which is seeded per launch.
+    public var pureDSPSignature: String {
+        var s = "\(shimmerEnabled),\(shimmerMix),\(shimmerPitch),\(shimmerFeedback),\(shimmerSize),\(shimmerDamping),\(shimmerClimbSeconds)"
+        s += "|\(convolutionReverbEnabled),\(convolutionReverbProfile.rawValue),\(convolutionReverbDecaySeconds),\(convolutionReverbMix)"
+        s += ",\(convolutionReverbCustomIRData?.count ?? -1),\(convolutionReverbCustomIRData?.hashValue ?? 0),\(convolutionReverbCustomIRName ?? "")"
+        s += "|\(sweepFilterEnabled),\(sweepFilterShape.rawValue),\(sweepFilterCutoff),\(sweepFilterResonance),\(sweepFilterBassCut),\(sweepFilterLFOPeriod),\(sweepFilterLFODepth)"
+        s += "|\(wowEnabled),\(wowAmount),\(wowRateHz)"
+        s += "|\(pumpEnabled),\(pumpDepth),\(pumpRateHz)"
+        s += "|\(autoPanEnabled),\(autoPanDepth),\(autoPanRateHz)"
+        if !parameterLanes.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            if let data = try? encoder.encode(parameterLanes) {
+                s += "|" + String(decoding: data, as: UTF8.self)
+            }
+        }
+        return s
+    }
+
     /// Creates the all-off default settings.
     public init() {}
 

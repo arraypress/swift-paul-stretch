@@ -212,6 +212,35 @@ extension StereoBuffer {
     }
 }
 
+// MARK: - Display support
+
+extension StereoBuffer {
+
+    /// Returns per-column peak levels for waveform drawing.
+    ///
+    /// Each column holds the peak absolute sample of its slice of the left
+    /// channel, found by sub-sampling (up to 48 probes per column) — display
+    /// accuracy, not measurement accuracy, at any zoom level for free.
+    ///
+    /// - Parameter columns: The number of columns the waveform view draws.
+    /// - Returns: `columns` peak values in `0…1` (empty for an empty buffer).
+    public func peaks(columns: Int) -> [Float] {
+        let n = frameCount
+        guard n > 0, columns > 0 else { return [] }
+        var out = [Float](repeating: 0, count: columns)
+        for c in 0..<columns {
+            let start = c * n / columns
+            let end = max(start + 1, (c + 1) * n / columns)
+            let step = max(1, (end - start) / 48)
+            var pk: Float = 0
+            var i = start
+            while i < end && i < n { pk = max(pk, abs(l[i])); i += step }
+            out[c] = pk
+        }
+        return out
+    }
+}
+
 // MARK: - In-place implementations (shared with the render pipeline)
 
 /// Mid/side stereo widener, in place. Kept as a free function so the render
