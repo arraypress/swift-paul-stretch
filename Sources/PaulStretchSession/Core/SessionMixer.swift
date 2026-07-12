@@ -48,9 +48,9 @@ public final class SessionMixer: ObservableObject {
 
     private struct Channel {
         let mixer = AVAudioMixerNode()
-        var players: [AVAudioPlayerNode] = []
+        var players: [UUID: AVAudioPlayerNode] = [:]   // by clip id
         var track: Track
-        var voices: [UUID: StereoBuffer] = [:]   // by clip id
+        var voices: [UUID: StereoBuffer] = [:]         // by clip id
         var laneGain: Float = 1
     }
 
@@ -75,9 +75,12 @@ public final class SessionMixer: ObservableObject {
     ///     one are silent).
     public func prepare(session: Session, voices: [UUID: StereoBuffer]) {
         stop()
+        // Rebuilding a running graph throws from deep inside AVAudioEngine —
+        // always take it down first; play() restarts it.
+        engine.stop()
         for ch in channels.values {
             ch.mixer.removeTap(onBus: 0)
-            ch.players.forEach { engine.detach($0) }
+            ch.players.values.forEach { engine.detach($0) }
             engine.detach(ch.mixer)
         }
         channels.removeAll()
@@ -99,7 +102,7 @@ public final class SessionMixer: ObservableObject {
                 engine.attach(player)
                 engine.connect(player, to: ch.mixer, format: fmt)
                 player.volume = clip.gain
-                ch.players.append(player)
+                ch.players[clip.id] = player
                 ch.voices[clip.id] = voice
             }
             installMeterTap(on: ch.mixer, trackID: track.id)
@@ -183,13 +186,13 @@ public final class SessionMixer: ObservableObject {
             + AVAudioTime.hostTime(forSeconds: 0.12))
 
         for ch in channels.values {
-            for (index, clip) in ch.track.clips.enumerated() {
-                guard index < ch.players.count,
+            for clip in ch.track.clips {
+                guard let player = ch.players[clip.id],
                       let voice = ch.voices[clip.id] else { continue }
-                let player = ch.players[index]
-                schedule(clip, voice: voice, on: player,
-                         from: at, sessionEnd: session.durationSeconds, anchor: hostStart)
-                player.play(at: hostStart)
+                let scheduled = schedule(clip, voice: voice, on: player,
+                                         from: at, sessionEnd: session.durationSeconds,
+                                         anchor: hostStart)
+                if scheduled { player.play(at: hostStart) }
             }
         }
         basePosition = at
@@ -239,13 +242,14 @@ public final class SessionMixer: ObservableObject {
     /// slice (honouring the clip's left-trim and where the playhead falls),
     /// then whole-voice iterations back-to-back — `AVAudioPlayerNode`
     /// concatenates queued buffers sample-accurately, so tiling stays exact.
+    @discardableResult
     private func schedule(_ clip: Clip, voice: StereoBuffer, on player: AVAudioPlayerNode,
-                          from t: Double, sessionEnd: Double, anchor: AVAudioTime) {
+                          from t: Double, sessionEnd: Double, anchor: AVAudioTime) -> Bool {
         let voiceSeconds = voice.duration
-        guard voiceSeconds > 0 else { return }
+        guard voiceSeconds > 0 else { return false }
         let clipStart = clip.startSeconds
         let clipEnd = min(clip.endSeconds, sessionEnd)
-        guard clipEnd > t else { return }
+        guard clipEnd > t else { return false }
 
         let audioBegins = max(t, clipStart)
         let delay = audioBegins - t
@@ -255,6 +259,7 @@ public final class SessionMixer: ObservableObject {
             ? AVAudioTime(hostTime: anchor.hostTime + AVAudioTime.hostTime(forSeconds: delay))
             : anchor
         let fullPCM = AudioFileIO.makePCMBuffer(voice, format: format)
+        var scheduledAnything = false
 
         while remaining > 0.001 {
             var posInVoice = clip.offsetSeconds + posInClip
@@ -275,11 +280,13 @@ public final class SessionMixer: ObservableObject {
             }
             if let pcm {
                 player.scheduleBuffer(pcm, at: when, options: [], completionHandler: nil)
+                scheduledAnything = true
             }
             when = nil          // subsequent slices queue back-to-back
             posInClip += sliceSeconds
             remaining -= sliceSeconds
         }
+        return scheduledAnything
     }
 
     // MARK: - Meters
@@ -299,7 +306,7 @@ public final class SessionMixer: ObservableObject {
     }
 
     private func stopPlayers() {
-        for ch in channels.values { ch.players.forEach { $0.stop() } }
+        for ch in channels.values { ch.players.values.forEach { $0.stop() } }
         for id in levels.keys { levels[id] = 0 }
     }
 
