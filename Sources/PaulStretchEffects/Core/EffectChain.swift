@@ -9,7 +9,9 @@
 //
 
 import AVFoundation
+#if canImport(AudioToolbox)
 import AudioToolbox
+#endif
 import PaulStretch
 
 // The AVAudioUnit effect classes do not exist on watchOS — this product
