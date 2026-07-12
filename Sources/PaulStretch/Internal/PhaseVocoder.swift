@@ -33,15 +33,20 @@ struct PVSpec {
     let hann: [Float]
     let pitchFactor: Double
     let doPitch: Bool
+    /// Read the input circularly (seamless-loop renders) instead of
+    /// zero-padding past its ends — see `StretchKernel.wrapInput`.
+    let wrapInput: Bool
 
     init(input: StereoBuffer,
          ratio: Double,
          windowSeconds: Double,
-         pitchSemitones: Double) {
+         pitchSemitones: Double,
+         wrapInput: Bool = false) {
         let sr = input.sampleRate
         self.inL = input.l
         self.inR = input.r
         self.inputLen = input.frameCount
+        self.wrapInput = wrapInput && input.frameCount > 0
         self.sampleRate = sr
         let windowSize = nextPow2(Int(windowSeconds * sr))
         self.windowSize = windowSize
@@ -137,15 +142,24 @@ final class PVStream {
             spec.inR.withUnsafeBufferPointer { rp in
                 spec.hann.withUnsafeBufferPointer { hp in
                     let srcL = lp.baseAddress!, srcR = rp.baseAddress!, win = hp.baseAddress!
-                    for i in 0..<W {
-                        let idx = inputStart + i
-                        let w = win[i]
-                        if idx >= 0 && idx < spec.inputLen {
+                    if spec.wrapInput {
+                        for i in 0..<W {
+                            let idx = (inputStart + i) % spec.inputLen
+                            let w = win[i]
                             realL[i] = srcL[idx] * w; realR[i] = srcR[idx] * w
-                        } else {
-                            realL[i] = 0; realR[i] = 0
+                            imagL[i] = 0; imagR[i] = 0
                         }
-                        imagL[i] = 0; imagR[i] = 0
+                    } else {
+                        for i in 0..<W {
+                            let idx = inputStart + i
+                            let w = win[i]
+                            if idx >= 0 && idx < spec.inputLen {
+                                realL[i] = srcL[idx] * w; realR[i] = srcR[idx] * w
+                            } else {
+                                realL[i] = 0; realR[i] = 0
+                            }
+                            imagL[i] = 0; imagR[i] = 0
+                        }
                     }
                 }
             }

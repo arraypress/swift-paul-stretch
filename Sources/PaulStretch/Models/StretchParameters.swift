@@ -142,8 +142,11 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     ///
     /// The pipeline renders one loop-crossfade longer than
     /// ``targetSeconds`` and equal-power crossfades the tail into the head,
-    /// so the file repeats with no audible seam. When enabled the fade
-    /// parameters are ignored.
+    /// so the file repeats with no audible seam. Loop renders also read the
+    /// source **circularly** in the stretching modes, so the render
+    /// sustains full energy end-to-end instead of decaying as the analysis
+    /// window slides past the source's end (one-shots keep that natural
+    /// decaying tail). When enabled the fade parameters are ignored.
     public var seamlessLoop: Bool = false
 
     /// Linear fade-in applied to one-shot renders, in seconds. Capped at

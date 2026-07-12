@@ -114,7 +114,8 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
         let spec = PVSpec(input: src,
                           ratio: max(0.05, desiredRatio),
                           windowSeconds: p.windowSeconds,
-                          pitchSemitones: p.pitchSemitones)
+                          pitchSemitones: p.pitchSemitones,
+                          wrapInput: p.seamlessLoop)
         path = .phaseVocoder(spec)
         preLoopFrames = Int(renderSeconds * sr)
     } else {
@@ -133,6 +134,10 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
             let desiredRatio = (renderSeconds * recipe.scale) / inputDur
             let ratio = max(1, min(desiredRatio, effMaxStretch * max(1, recipe.scale)))
             let passthrough = ratio <= 1.001
+            // Loop renders read the source circularly so the stretch
+            // sustains full energy to the end of the timeline; one-shots
+            // keep the classic decaying tail as the read head passes the
+            // source's end.
             let kernel: StretchKernel? = passthrough ? nil
                 : StretchKernel(input: src,
                                 ratio: ratio,
@@ -140,7 +145,8 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                                 phaseRandomness: p.phaseRandomness,
                                 pitchSemitones: p.pitchSemitones + recipe.pitch,
                                 onsetSensitivity: p.onsetSensitivity,
-                                seed: layerSeed)
+                                seed: layerSeed,
+                                wrapInput: p.seamlessLoop)
             let stretchedFrames = kernel?.outputLength ?? src.frameCount
             let stretchedDur = Double(stretchedFrames) / sr
             let tileFade = min(2, stretchedDur / 4)

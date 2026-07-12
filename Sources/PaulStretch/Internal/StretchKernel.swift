@@ -114,6 +114,13 @@ struct StretchKernel {
     let pitchFactor: Double
     let doPitch: Bool
     let seed: UInt64
+    /// Read the input circularly instead of zero-padding past its ends.
+    ///
+    /// Used by seamless-loop renders: without it, the analysis window
+    /// progressively empties as the read head passes the input's end, so
+    /// the final `windowSize / inputLen` fraction of the output decays to
+    /// silence — glaring when the input is short relative to the window.
+    let wrapInput: Bool
 
     /// The number of windows a full render processes (progress accounting).
     var totalBlocks: Int { lastBlock + 1 }
@@ -128,11 +135,13 @@ struct StretchKernel {
          phaseRandomness: Double,
          pitchSemitones: Double,
          onsetSensitivity: Double,
-         seed: UInt64) {
+         seed: UInt64,
+         wrapInput: Bool = false) {
         let sr = input.sampleRate
         self.inL = input.l
         self.inR = input.r
         self.inputLen = input.frameCount
+        self.wrapInput = wrapInput && input.frameCount > 0
         self.phaseRandomness = min(max(phaseRandomness, 0), 1)
         self.onsetSensitivity = min(max(onsetSensitivity, 0), 1)
         self.pitchFactor = pow(2.0, pitchSemitones / 12.0)
@@ -209,15 +218,24 @@ struct StretchKernel {
                 let outputPos = b * outputStride
                 let inputStart = Int(Double(b) * inputStride)
 
-                for i in 0..<windowSize {
-                    let idx = inputStart + i
-                    let ww = win[i]
-                    if idx >= 0 && idx < inputLen {
+                if wrapInput {
+                    for i in 0..<windowSize {
+                        let idx = (inputStart + i) % inputLen
+                        let ww = win[i]
                         realL[i] = inLp[idx] * ww; realR[i] = inRp[idx] * ww
-                    } else {
-                        realL[i] = 0; realR[i] = 0
+                        imagL[i] = 0; imagR[i] = 0
                     }
-                    imagL[i] = 0; imagR[i] = 0
+                } else {
+                    for i in 0..<windowSize {
+                        let idx = inputStart + i
+                        let ww = win[i]
+                        if idx >= 0 && idx < inputLen {
+                            realL[i] = inLp[idx] * ww; realR[i] = inRp[idx] * ww
+                        } else {
+                            realL[i] = 0; realR[i] = 0
+                        }
+                        imagL[i] = 0; imagR[i] = 0
+                    }
                 }
 
                 ft.forward(realL, imagL)

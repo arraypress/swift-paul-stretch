@@ -205,6 +205,60 @@ final class NewModesTests: XCTestCase {
                           "pitch spread should scatter energy away from the source tone")
     }
 
+    // MARK: - Loop sustain (circular source reading)
+
+    func testLoopRendersSustainWhileOneShotsDecay() {
+        // A source SHORTER than the analysis window is the pathological
+        // case: most of a one-shot render sits in progressively emptier
+        // windows and decays. Loop renders read the source circularly and
+        // must hold level to the very end.
+        let source = TestSignals.sine(330, seconds: 0.6)
+
+        func rms(_ b: StereoBuffer, _ range: Range<Int>) -> Double {
+            var acc = 0.0
+            for i in range { acc += Double(b.l[i]) * Double(b.l[i]) }
+            return (acc / Double(range.count)).squareRoot()
+        }
+
+        for mode in [StretchMode.paulStretch, .phaseVocoder] {
+            let base = params {
+                $0.mode = mode
+                $0.layering = .off
+                $0.targetSeconds = 30
+                $0.windowSeconds = 0.25          // window ≈ 62% of the source
+                $0.fadeInSeconds = 0
+                $0.fadeOutSeconds = 0
+            }
+
+            var loopP = base; loopP.seamlessLoop = true
+            let looped = StretchRenderer.render(source, parameters: loopP, isCancelled: { false })
+            let n = looped.frameCount
+            let midRMS = rms(looped, (n / 2)..<(n / 2 + 44_100))
+            let endRMS = rms(looped, (n - 44_100)..<n)
+            XCTAssertGreaterThan(endRMS, midRMS * 0.5,
+                                 "\(mode): loop render must sustain to the end")
+        }
+
+        // One-shots keep the natural decaying tail. Asserted on the vocoder
+        // only: the tiled paulStretch path schedules a second tile whose
+        // fade-in occupies the final seconds of short one-shots, masking
+        // the decay there (original engine behaviour).
+        var oneShotP = params {
+            $0.mode = .phaseVocoder
+            $0.targetSeconds = 30
+            $0.windowSeconds = 0.25
+            $0.fadeInSeconds = 0
+            $0.fadeOutSeconds = 0
+        }
+        oneShotP.seamlessLoop = false
+        let oneShot = StretchRenderer.render(source, parameters: oneShotP, isCancelled: { false })
+        let m = oneShot.frameCount
+        let oneEarly = rms(oneShot, 44_100..<88_200)
+        let oneEnd = rms(oneShot, (m - 44_100)..<m)
+        XCTAssertLessThan(oneEnd, oneEarly * 0.2,
+                          "phaseVocoder: one-shot keeps the natural decaying tail")
+    }
+
     // MARK: - Chunked equality for every new mode
 
     func testChunkedMatchesInMemoryForNewModes() {
