@@ -253,7 +253,11 @@ public enum AppleEffect: Sendable, Codable, Equatable {
     case varispeed(VarispeedSettings)
     case dynamics(DynamicsProcessorSettings)
     case peakLimiter(PeakLimiterSettings)
+    /// Graphic EQ — **macOS only**; on other platforms this unit passes
+    /// audio through unchanged (racks stay portable and decodable).
     case graphicEQ(GraphicEQSettings)
+    /// 4-band multiband compressor — **macOS only**; on other platforms
+    /// this unit passes audio through unchanged.
     case multibandCompressor(MultibandCompressorSettings)
 }
 

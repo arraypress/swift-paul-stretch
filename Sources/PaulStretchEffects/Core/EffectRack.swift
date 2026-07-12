@@ -185,10 +185,20 @@ extension AppleEffect {
             return EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_DynamicsProcessor)
         case .peakLimiter:
             return EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_PeakLimiter)
-        case .graphicEQ:
-            return EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_GraphicEQ)
-        case .multibandCompressor:
+        case .graphicEQ, .multibandCompressor:
+            // These two units only exist on macOS. Elsewhere, stand in a
+            // transparent single-band EQ so racks stay portable (the unit
+            // passes audio through unchanged).
+            #if os(macOS)
+            if case .graphicEQ = self {
+                return EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_GraphicEQ)
+            }
             return EffectChain.makeAudioToolboxEffect(kAudioUnitSubType_MultiBandCompressor)
+            #else
+            let unit = AVAudioUnitEQ(numberOfBands: 1)
+            unit.bands[0].bypass = true
+            return unit
+            #endif
         }
     }
 
@@ -253,6 +263,7 @@ extension AppleEffect {
             EffectChain.setParameter(node, kLimiterParam_PreGain, max(-40, min(s.preGain, 40)))
 
         case .graphicEQ(let s):
+            #if os(macOS)
             guard let node = unit as? AVAudioUnitEffect else { return }
             EffectChain.setParameter(node, kGraphicEQParam_NumberOfBands, s.use31Bands ? 1 : 0)
             let count = s.use31Bands ? 31 : 10
@@ -260,8 +271,12 @@ extension AppleEffect {
                 let gain = i < s.bandGains.count ? max(-20, min(s.bandGains[i], 20)) : 0
                 EffectChain.setParameter(node, AudioUnitParameterID(i), gain)
             }
+            #else
+            _ = s   // macOS-only unit — transparent elsewhere
+            #endif
 
         case .multibandCompressor(let s):
+            #if os(macOS)
             guard let node = unit as? AVAudioUnitEffect else { return }
             EffectChain.setParameter(node, kMultibandCompressorParam_Pregain, max(-40, min(s.preGain, 40)))
             EffectChain.setParameter(node, kMultibandCompressorParam_Postgain, max(-40, min(s.postGain, 40)))
@@ -288,6 +303,9 @@ extension AppleEffect {
             }
             EffectChain.setParameter(node, kMultibandCompressorParam_AttackTime, max(0.001, min(s.attackTime, 0.2)))
             EffectChain.setParameter(node, kMultibandCompressorParam_ReleaseTime, max(0.01, min(s.releaseTime, 3)))
+            #else
+            _ = s   // macOS-only unit — transparent elsewhere
+            #endif
         }
     }
 }
