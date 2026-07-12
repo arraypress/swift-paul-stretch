@@ -50,6 +50,7 @@ public final class SessionMixer: ObservableObject {
         var track: Track
         var voice: StereoBuffer
         var format: AVAudioFormat
+        var laneGain: Float = 1
     }
 
     private let engine = AVAudioEngine()
@@ -118,6 +119,22 @@ public final class SessionMixer: ObservableObject {
         mutateTrack(trackID) { $0.isSoloed = soloed }
     }
 
+    /// Live automation drive: a multiplier on top of the track's gain.
+    ///
+    /// Hosts evaluate session-time gain lanes on a timer during playback
+    /// and feed the values here, so what you hear tracks what the bounce
+    /// applies sample-accurately. Reset to `1` when the lane is removed.
+    ///
+    /// - Parameters:
+    ///   - trackID: The track.
+    ///   - multiplier: The lane value (`0…1` typically).
+    public func setGainMultiplier(trackID: UUID, _ multiplier: Float) {
+        guard let session, var ch = channels[trackID] else { return }
+        ch.laneGain = max(0, multiplier)
+        applyMixerState(to: &ch, session: session)
+        channels[trackID] = ch
+    }
+
     private func mutateTrack(_ id: UUID, _ mutate: (inout Track) -> Void) {
         guard var session, var ch = channels[id] else { return }
         mutate(&ch.track)
@@ -134,7 +151,7 @@ public final class SessionMixer: ObservableObject {
     }
 
     private func applyMixerState(to ch: inout Channel, session: Session) {
-        ch.mixer.outputVolume = session.isAudible(ch.track) ? ch.track.gain : 0
+        ch.mixer.outputVolume = session.isAudible(ch.track) ? ch.track.gain * ch.laneGain : 0
         ch.mixer.pan = max(-1, min(1, ch.track.pan))
     }
 
