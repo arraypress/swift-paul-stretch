@@ -2,9 +2,9 @@
 //  SessionRenderer.swift
 //  SwiftPaulStretch
 //
-//  The deterministic session bounce: resolve each track's voice, bake its
-//  stack, place/loop it on the timeline with lanes and pan law, sum, and
-//  run the master stack.
+//  The deterministic session bounce: render each clip's voice (cacheable),
+//  place clips on the timeline (tiling, trims, fades, gains), apply track
+//  channels and lanes, sum, and run the master stack.
 //
 //  Created by David Sherlock on 7/12/26.
 //
@@ -19,13 +19,13 @@ import PaulStretchEffects
 
 /// Errors thrown while rendering a session.
 public enum SessionRenderError: Error, Sendable {
-    /// A track's audio reference didn't resolve (bad bytes, missing file).
-    case unresolvableAudio(trackName: String)
+    /// A clip's audio reference didn't resolve (bad bytes, missing file).
+    case unresolvableAudio(clipName: String)
     /// A generative render was cancelled or produced nothing.
-    case emptyRender(trackName: String)
+    case emptyRender(clipName: String)
 }
 
-/// Renders ``Session``s: per-track voices (cacheable — everything is
+/// Renders ``Session``s: per-clip voices (cacheable — everything is
 /// deterministic) and the full timeline bounce.
 public enum SessionRenderer {
 
@@ -36,63 +36,68 @@ public enum SessionRenderer {
 
     // MARK: - Voices
 
-    /// Renders one track's voice: source resolved, engine run (for
-    /// generative tracks), channel strip baked.
+    /// Renders one clip's voice: source resolved, engine run (for
+    /// generative clips), the owning track's channel strip baked.
     ///
-    /// Voices are *timeline-independent* — gain/pan and their lanes apply at
-    /// placement — so a voice can be cached against
-    /// ``voiceCacheKey(for:sampleRate:)`` and reused across edits that don't
-    /// touch the source or the stack.
+    /// Voices are *placement-independent* — position, length, trim, fades
+    /// and gains apply at placement — so dragging or trimming a clip never
+    /// re-renders. Cache against ``voiceCacheKey(for:trackStack:sampleRate:)``.
     ///
     /// - Parameters:
-    ///   - track: The track whose voice to render.
+    ///   - clip: The clip whose voice to render.
+    ///   - trackStack: The owning track's channel strip.
     ///   - sampleRate: The session sample rate, in hertz.
     ///   - isCancelled: Polled during generative renders; return `true` to
     ///     abandon.
     /// - Returns: The voice audio.
     /// - Throws: ``SessionRenderError`` when the source doesn't resolve or
     ///   the render comes back empty.
-    public static func renderVoice(for track: Track,
+    public static func renderVoice(for clip: Clip,
+                                   trackStack: EffectStack = EffectStack(),
                                    sampleRate: Double,
                                    isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> StereoBuffer {
-        guard let source = track.source.audio.resolve(sampleRate: sampleRate) else {
-            throw SessionRenderError.unresolvableAudio(trackName: track.name)
+        guard let source = clip.source.audio.resolve(sampleRate: sampleRate) else {
+            throw SessionRenderError.unresolvableAudio(clipName: clip.name)
         }
         var voice: StereoBuffer
-        switch track.source {
+        switch clip.source {
         case .sample(let s):
             voice = source
-            if track.loops && s.seamlessLoop {
+            if clip.fillsWithLoop && s.seamlessLoop {
                 voice = voice.seamlesslyLooped()
             }
         case .generative(let g):
             var params = g.parameters
-            params.seamlessLoop = track.loops    // loop seam handled by the engine
+            params.seamlessLoop = clip.fillsWithLoop   // loop seam handled by the engine
             voice = StretchRenderer.render(source, parameters: params, seed: g.seed,
                                            isCancelled: isCancelled)
             if voice.isEmpty {
-                throw SessionRenderError.emptyRender(trackName: track.name)
+                throw SessionRenderError.emptyRender(clipName: clip.name)
             }
         }
-        return EffectStackBaker.bake(voice, stack: track.stack)
+        return EffectStackBaker.bake(voice, stack: trackStack)
     }
 
-    /// A cache key for ``renderVoice(for:sampleRate:)`` output: it changes
-    /// exactly when the rendered voice would (source, engine settings, seed,
-    /// loop treatment, stack — not mixer state or timeline position).
+    /// A cache key for ``renderVoice(for:trackStack:sampleRate:)`` output:
+    /// it changes exactly when the rendered voice would (source, engine
+    /// settings, seed, loop treatment, the track's strip — never placement,
+    /// trims, fades or gains).
     ///
     /// Compare within a single process only (embedded bytes fold in via
     /// `hashValue`).
     ///
     /// - Parameters:
-    ///   - track: The track.
+    ///   - clip: The clip.
+    ///   - trackStack: The owning track's channel strip.
     ///   - sampleRate: The session sample rate, in hertz.
     /// - Returns: The key.
-    public static func voiceCacheKey(for track: Track, sampleRate: Double) -> String {
-        var key = "sr:\(sampleRate)|loops:\(track.loops)"
-        let audio = track.source.audio
+    public static func voiceCacheKey(for clip: Clip,
+                                     trackStack: EffectStack = EffectStack(),
+                                     sampleRate: Double) -> String {
+        var key = "sr:\(sampleRate)|fills:\(clip.fillsWithLoop)"
+        let audio = clip.source.audio
         key += "|audio:\(audio.path ?? ""),\(audio.data?.count ?? -1),\(audio.data?.hashValue ?? 0)"
-        switch track.source {
+        switch clip.source {
         case .sample(let s):
             key += "|sample:\(s.seamlessLoop)"
         case .generative(let g):
@@ -101,7 +106,7 @@ public enum SessionRenderer {
             let params = (try? encoder.encode(g.parameters)).map { String(decoding: $0, as: UTF8.self) } ?? ""
             key += "|gen:\(g.seed);\(params)"
         }
-        return key + "|stack:\(track.stack.signature)"
+        return key + "|stack:\(trackStack.signature)"
     }
 
     // MARK: - Bounce
@@ -109,13 +114,13 @@ public enum SessionRenderer {
     /// Bounces the whole session to a buffer.
     ///
     /// Deterministic: the same session renders the identical file every
-    /// time. Pass pre-rendered voices (keyed by track `id`) to skip the
-    /// per-track render — the host's cache layer; any track missing from
-    /// the dictionary is rendered here.
+    /// time. Pass pre-rendered voices (keyed by clip `id`) to skip the
+    /// per-clip render — the host's cache layer; any clip missing from the
+    /// dictionary is rendered here.
     ///
     /// - Parameters:
     ///   - session: The session to bounce.
-    ///   - voices: Optional pre-rendered voices by track `id`.
+    ///   - voices: Optional pre-rendered voices by clip `id`.
     ///   - isCancelled: Polled between stages; return `true` to abandon
     ///     (an empty buffer is returned).
     ///   - progress: Called with `0…1` as tracks complete.
@@ -130,13 +135,21 @@ public enum SessionRenderer {
         var mixL = [Float](repeating: 0, count: frames)
         var mixR = [Float](repeating: 0, count: frames)
 
-        let audible = session.tracks.filter { session.isAudible($0) }
+        let audible = session.tracks.filter { session.isAudible($0) && !$0.clips.isEmpty }
         for (index, track) in audible.enumerated() {
             if isCancelled() { return StereoBuffer(l: [], r: [], sampleRate: sr) }
-            let voice = try voices[track.id]
-                ?? renderVoice(for: track, sampleRate: sr, isCancelled: isCancelled)
-            place(voice, for: track, sessionSeconds: session.durationSeconds,
-                  into: &mixL, &mixR)
+
+            // Clips accumulate into the track bus, then the channel
+            // (gain/pan + lanes) applies while summing into the mix.
+            var busL = [Float](repeating: 0, count: frames)
+            var busR = [Float](repeating: 0, count: frames)
+            for clip in track.clips {
+                let voice = try voices[clip.id]
+                    ?? renderVoice(for: clip, trackStack: track.stack, sampleRate: sr,
+                                   isCancelled: isCancelled)
+                place(clip, voice: voice, into: &busL, &busR, sampleRate: sr)
+            }
+            applyChannel(track, bus: busL, busR, into: &mixL, &mixR)
             progress?(Double(index + 1) / Double(audible.count + 1))
         }
 
@@ -149,42 +162,62 @@ public enum SessionRenderer {
 
     // MARK: - Placement
 
-    /// Places a voice onto the timeline: entry point, looping with phase,
-    /// gain/pan (and their session-time lanes, evaluated per block), summed
-    /// into the mix.
-    static func place(_ voice: StereoBuffer,
-                      for track: Track,
-                      sessionSeconds: Double,
-                      into mixL: inout [Float], _ mixR: inout [Float]) {
-        let frames = mixL.count
+    /// Places one clip onto a track bus: entry point, voice tiling (or
+    /// one-shot), left-trim offset, clip gain, linear edge fades.
+    static func place(_ clip: Clip, voice: StereoBuffer,
+                      into busL: inout [Float], _ busR: inout [Float],
+                      sampleRate sr: Double) {
+        let frames = busL.count
         let voiceLen = voice.frameCount
-        guard voiceLen > 0, frames > 0 else { return }
-        let sr = voice.sampleRate
+        guard voiceLen > 0, frames > 0, clip.durationSeconds > 0 else { return }
 
-        let startFrame = max(0, Int(track.startSeconds * sr))
-        let phaseFrames = max(0, Int(track.loopPhaseSeconds * sr)) % voiceLen
-        guard startFrame < frames else { return }
+        let startFrame = Int(clip.startSeconds * sr)
+        let clipFrames = Int(clip.durationSeconds * sr)
+        let offsetFrames = max(0, Int(clip.offsetSeconds * sr))
+        let fadeInFrames = max(0, Int(clip.fadeInSeconds * sr))
+        let fadeOutFrames = max(0, Int(clip.fadeOutSeconds * sr))
 
-        var n = startFrame
+        let first = max(0, startFrame)
+        let last = min(frames, startFrame + clipFrames)
+        guard first < last else { return }
+
+        for n in first..<last {
+            let posInClip = n - startFrame
+            var local = posInClip + offsetFrames
+            if clip.fillsWithLoop {
+                local %= voiceLen
+            } else if local >= voiceLen {
+                break
+            }
+            var g = clip.gain
+            if fadeInFrames > 0 && posInClip < fadeInFrames {
+                g *= Float(posInClip) / Float(fadeInFrames)
+            }
+            let fromEnd = clipFrames - posInClip
+            if fadeOutFrames > 0 && fromEnd < fadeOutFrames {
+                g *= Float(fromEnd) / Float(fadeOutFrames)
+            }
+            busL[n] += voice.l[local] * g
+            busR[n] += voice.r[local] * g
+        }
+    }
+
+    /// Applies a track's channel — gain/pan and their session-time lanes,
+    /// evaluated per block — while summing the bus into the mix.
+    static func applyChannel(_ track: Track,
+                             bus busL: [Float], _ busR: [Float],
+                             into mixL: inout [Float], _ mixR: inout [Float]) {
+        let frames = mixL.count
+        var n = 0
         while n < frames {
-            // One lane block: constant gain/pan, cheap inner loop.
             let blockEnd = min(frames, n + laneBlockFrames)
-            let t = Double(n) / (Double(frames) - 1)
-            let gain = track.gain * Float(laneValue(track.gainLane, at: t, fallback: 1))
+            let t = Double(n) / Double(max(1, frames - 1))
+            let gain = track.gain * Float(track.gainLane?.value(at: t) ?? 1)
             let pan = track.panLane.map { Float($0.value(at: t)) * 2 - 1 } ?? track.pan
-            let (gL, gR) = Self.balanceGains(pan: pan)
-
+            let (gL, gR) = balanceGains(pan: pan)
             for i in n..<blockEnd {
-                let rel = i - startFrame
-                let local: Int
-                if track.loops {
-                    local = (rel + phaseFrames) % voiceLen
-                } else {
-                    local = rel + phaseFrames
-                    if local >= voiceLen { return }
-                }
-                mixL[i] += voice.l[local] * gain * gL
-                mixR[i] += voice.r[local] * gain * gR
+                mixL[i] += busL[i] * gain * gL
+                mixR[i] += busR[i] * gain * gR
             }
             n = blockEnd
         }
@@ -196,11 +229,6 @@ public enum SessionRenderer {
         let p = max(-1, min(1, pan))
         let attenuation = cosf(abs(p) * .pi / 2)
         return p >= 0 ? (attenuation, 1) : (1, attenuation)
-    }
-
-    @inline(__always)
-    private static func laneValue(_ lane: AutomationLane?, at t: Double, fallback: Double) -> Double {
-        lane?.value(at: t) ?? fallback
     }
 }
 

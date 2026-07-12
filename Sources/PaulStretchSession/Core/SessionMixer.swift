@@ -2,8 +2,8 @@
 //  SessionMixer.swift
 //  SwiftPaulStretch
 //
-//  The live transport: every track's voice on its own sample-locked,
-//  loop-phasing channel, with realtime gain / pan / mute / solo.
+//  The live transport: clips scheduled sample-locked on per-track channels,
+//  realtime gain / pan / mute / solo, lane drive, and per-track meters.
 //
 //  Created by David Sherlock on 7/12/26.
 //
@@ -19,18 +19,17 @@ import PaulStretchEffects
 
 /// Live multitrack playback for a ``Session``.
 ///
-/// Each track gets its own `AVAudioPlayerNode` → `AVAudioMixerNode` channel;
-/// all channels start on a single shared `AVAudioTime`, so loops of
-/// different lengths stay sample-locked while they phase against each
-/// other. Gain, pan, mute and solo respond live; the channel strips are
-/// already baked into the voices you pass to ``prepare(session:voices:)``
-/// (see ``SessionRenderer/renderVoice(for:sampleRate:isCancelled:)``).
+/// Each track gets an `AVAudioMixerNode` channel; each of its clips gets an
+/// `AVAudioPlayerNode` feeding that channel. Every player starts against
+/// one shared `AVAudioTime` anchor, so clips (and tiled loops of different
+/// lengths) stay sample-locked while they phase. Gain, pan, mute and solo
+/// respond live; ``levels`` publishes smoothed per-track meter values.
 ///
-/// Master-stack note: the summed bus is played dry live in this version —
-/// the master strip (often shimmer/convolution, which can't sit on a live
-/// graph) is applied by the bounce, exactly like the single-render apps
-/// bake pure effects. Track strips are always audible because they live in
-/// the voices.
+/// The clips' voices are pre-rendered (see
+/// ``SessionRenderer/renderVoice(for:trackStack:sampleRate:isCancelled:)``)
+/// with the track strip baked in. Clip fades are printed by the bounce but
+/// not applied live in this version. The master strip is bounce-only (its
+/// pure-DSP devices can't sit on a live graph).
 @MainActor
 public final class SessionMixer: ObservableObject {
 
@@ -44,18 +43,21 @@ public final class SessionMixer: ObservableObject {
     /// The prepared session's length, in seconds.
     @Published public private(set) var duration: Double = 0
 
+    /// Smoothed post-channel meter levels by track `id`, `0…1`.
+    @Published public private(set) var levels: [UUID: Float] = [:]
+
     private struct Channel {
-        let player = AVAudioPlayerNode()
         let mixer = AVAudioMixerNode()
+        var players: [AVAudioPlayerNode] = []
         var track: Track
-        var voice: StereoBuffer
-        var format: AVAudioFormat
+        var voices: [UUID: StereoBuffer] = [:]   // by clip id
         var laneGain: Float = 1
     }
 
     private let engine = AVAudioEngine()
     private var channels: [UUID: Channel] = [:]
     private var session: Session?
+    private var format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
     private var basePosition: Double = 0
     private var startDate: Date?
     private var timer: Timer?
@@ -65,33 +67,42 @@ public final class SessionMixer: ObservableObject {
 
     // MARK: - Setup
 
-    /// Loads a session and its rendered voices, (re)building the graph.
+    /// Loads a session and its rendered clip voices, (re)building the graph.
     ///
     /// - Parameters:
     ///   - session: The session to play.
-    ///   - voices: The rendered voice for every track `id` (tracks without
+    ///   - voices: The rendered voice for every clip `id` (clips without
     ///     one are silent).
     public func prepare(session: Session, voices: [UUID: StereoBuffer]) {
         stop()
         for ch in channels.values {
-            engine.detach(ch.player)
+            ch.mixer.removeTap(onBus: 0)
+            ch.players.forEach { engine.detach($0) }
             engine.detach(ch.mixer)
         }
         channels.removeAll()
+        levels.removeAll()
 
         self.session = session
         duration = session.durationSeconds
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate,
+                                      channels: 2) else { return }
+        format = fmt
 
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate,
-                                         channels: 2) else { return }
         for track in session.tracks {
-            guard let voice = voices[track.id], voice.frameCount > 0 else { continue }
-            var ch = Channel(track: track, voice: voice, format: format)
-            ch.track = track
-            engine.attach(ch.player)
+            var ch = Channel(track: track)
             engine.attach(ch.mixer)
-            engine.connect(ch.player, to: ch.mixer, format: format)
-            engine.connect(ch.mixer, to: engine.mainMixerNode, format: format)
+            engine.connect(ch.mixer, to: engine.mainMixerNode, format: fmt)
+            for clip in track.clips {
+                guard let voice = voices[clip.id], voice.frameCount > 0 else { continue }
+                let player = AVAudioPlayerNode()
+                engine.attach(player)
+                engine.connect(player, to: ch.mixer, format: fmt)
+                player.volume = clip.gain
+                ch.players.append(player)
+                ch.voices[clip.id] = voice
+            }
+            installMeterTap(on: ch.mixer, trackID: track.id)
             applyMixerState(to: &ch, session: session)
             channels[track.id] = ch
         }
@@ -157,8 +168,8 @@ public final class SessionMixer: ObservableObject {
 
     // MARK: - Transport
 
-    /// Starts playback at a session time, sample-locking every channel to
-    /// one shared start.
+    /// Starts playback at a session time, sample-locking every clip player
+    /// to one shared start.
     ///
     /// - Parameter t: The session time to start from, in seconds.
     public func play(from t: Double = 0) {
@@ -167,13 +178,19 @@ public final class SessionMixer: ObservableObject {
         if !engine.isRunning { try? engine.start() }
 
         let at = max(0, min(t, duration))
-        // One shared anchor ~120 ms out gives every channel time to schedule.
+        // One shared anchor ~120 ms out gives every player time to schedule.
         let hostStart = AVAudioTime(hostTime: mach_absolute_time()
             + AVAudioTime.hostTime(forSeconds: 0.12))
 
         for ch in channels.values {
-            schedule(ch, sessionTime: at, sessionSeconds: session.durationSeconds, at: hostStart)
-            ch.player.play(at: hostStart)
+            for (index, clip) in ch.track.clips.enumerated() {
+                guard index < ch.players.count,
+                      let voice = ch.voices[clip.id] else { continue }
+                let player = ch.players[index]
+                schedule(clip, voice: voice, on: player,
+                         from: at, sessionEnd: session.durationSeconds, anchor: hostStart)
+                player.play(at: hostStart)
+            }
         }
         basePosition = at
         startDate = Date()
@@ -193,7 +210,7 @@ public final class SessionMixer: ObservableObject {
     }
 
     /// Moves the playhead, keeping the play state (a live seek reschedules
-    /// every channel on a fresh shared anchor).
+    /// every clip on a fresh shared anchor).
     ///
     /// - Parameter t: The target session time, in seconds.
     public func seek(to t: Double) {
@@ -218,50 +235,72 @@ public final class SessionMixer: ObservableObject {
 
     // MARK: - Scheduling
 
-    /// Schedules one channel from a session time: the first segment picks up
-    /// mid-loop (honouring entry point and phase), then a full-loop buffer
-    /// repeats seamlessly — `AVAudioPlayerNode` concatenates queued buffers
-    /// sample-accurately, so phasing stays exact.
-    private func schedule(_ ch: Channel, sessionTime: Double, sessionSeconds: Double,
-                          at when: AVAudioTime) {
-        let sr = ch.voice.sampleRate
-        let voiceLen = ch.voice.frameCount
-        guard voiceLen > 0 else { return }
-        let voiceSeconds = Double(voiceLen) / sr
+    /// Schedules one clip from a transport time: a possibly-partial first
+    /// slice (honouring the clip's left-trim and where the playhead falls),
+    /// then whole-voice iterations back-to-back — `AVAudioPlayerNode`
+    /// concatenates queued buffers sample-accurately, so tiling stays exact.
+    private func schedule(_ clip: Clip, voice: StereoBuffer, on player: AVAudioPlayerNode,
+                          from t: Double, sessionEnd: Double, anchor: AVAudioTime) {
+        let voiceSeconds = voice.duration
+        guard voiceSeconds > 0 else { return }
+        let clipStart = clip.startSeconds
+        let clipEnd = min(clip.endSeconds, sessionEnd)
+        guard clipEnd > t else { return }
 
-        let track = ch.track
-        var delay = 0.0
-        var localSeconds: Double
+        let audioBegins = max(t, clipStart)
+        let delay = audioBegins - t
+        var posInClip = audioBegins - clipStart
+        var remaining = clipEnd - audioBegins
+        var when: AVAudioTime? = delay > 0
+            ? AVAudioTime(hostTime: anchor.hostTime + AVAudioTime.hostTime(forSeconds: delay))
+            : anchor
+        let fullPCM = AudioFileIO.makePCMBuffer(voice, format: format)
 
-        if sessionTime < track.startSeconds {
-            // The track enters later — schedule it to start in the future.
-            delay = track.startSeconds - sessionTime
-            localSeconds = track.loopPhaseSeconds.truncatingRemainder(dividingBy: voiceSeconds)
-        } else {
-            let rel = sessionTime - track.startSeconds + track.loopPhaseSeconds
-            if track.loops {
-                localSeconds = rel.truncatingRemainder(dividingBy: voiceSeconds)
-            } else {
-                localSeconds = rel
-                if localSeconds >= voiceSeconds { return }   // already finished
+        while remaining > 0.001 {
+            var posInVoice = clip.offsetSeconds + posInClip
+            if clip.fillsWithLoop {
+                posInVoice = posInVoice.truncatingRemainder(dividingBy: voiceSeconds)
+            } else if posInVoice >= voiceSeconds - 0.001 {
+                break
             }
+            let sliceSeconds = min(voiceSeconds - posInVoice, remaining)
+            let isWholeVoice = posInVoice < 0.0005 && abs(sliceSeconds - voiceSeconds) < 0.0005
+            let pcm: AVAudioPCMBuffer?
+            if isWholeVoice {
+                pcm = fullPCM   // shared buffer for full iterations — no copies
+            } else {
+                pcm = AudioFileIO.makePCMBuffer(
+                    voice.trimmed(fromSeconds: posInVoice, toSeconds: posInVoice + sliceSeconds),
+                    format: format)
+            }
+            if let pcm {
+                player.scheduleBuffer(pcm, at: when, options: [], completionHandler: nil)
+            }
+            when = nil          // subsequent slices queue back-to-back
+            posInClip += sliceSeconds
+            remaining -= sliceSeconds
         }
+    }
 
-        let startAt: AVAudioTime = delay > 0
-            ? AVAudioTime(hostTime: when.hostTime + AVAudioTime.hostTime(forSeconds: delay))
-            : when
+    // MARK: - Meters
 
-        let head = ch.voice.trimmed(fromSeconds: localSeconds, toSeconds: voiceSeconds)
-        if let headPCM = AudioFileIO.makePCMBuffer(head, format: ch.format) {
-            ch.player.scheduleBuffer(headPCM, at: startAt, options: [], completionHandler: nil)
-        }
-        if track.loops, let loopPCM = AudioFileIO.makePCMBuffer(ch.voice, format: ch.format) {
-            ch.player.scheduleBuffer(loopPCM, at: nil, options: .loops, completionHandler: nil)
+    private func installMeterTap(on mixer: AVAudioMixerNode, trackID: UUID) {
+        var smoothed: Float = 0
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            guard let ch = buffer.floatChannelData else { return }
+            let n = Int(buffer.frameLength)
+            var peak: Float = 0
+            for i in 0..<n { peak = max(peak, abs(ch[0][i])) }
+            // Fast attack, slow decay.
+            smoothed = peak > smoothed ? peak : smoothed * 0.86 + peak * 0.14
+            let value = min(1, smoothed)
+            Task { @MainActor in self?.levels[trackID] = value }
         }
     }
 
     private func stopPlayers() {
-        for ch in channels.values { ch.player.stop() }
+        for ch in channels.values { ch.players.forEach { $0.stop() } }
+        for id in levels.keys { levels[id] = 0 }
     }
 
     private func startTimer() {

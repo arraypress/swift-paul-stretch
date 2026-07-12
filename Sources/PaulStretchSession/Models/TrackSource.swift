@@ -2,9 +2,8 @@
 //  TrackSource.swift
 //  SwiftPaulStretch
 //
-//  What a track plays: a sample loop, or a generative engine rendering from
-//  a seed sample. Audio travels embedded (bytes inside the session) or by
-//  file reference.
+//  The audio behind clips: an embedded-or-referenced AudioReference, and
+//  the sample / generative source descriptions built on it.
 //
 //  Created by David Sherlock on 7/12/26.
 //
@@ -15,25 +14,6 @@ import PaulStretch
 // This product builds on PaulStretchEffects, which compiles to an empty
 // module on watchOS.
 #if !os(watchOS)
-
-/// What a ``Track`` plays.
-public enum TrackSource: Sendable, Codable, Equatable {
-    /// An audio file played as-is (usually looped) — field recordings,
-    /// texture WAVs, bounced stems.
-    case sample(SampleSource)
-    /// A stretch engine rendering a voice from a seed sample — the
-    /// generative half of the studio. Same source + parameters + seed
-    /// always renders the identical voice.
-    case generative(GenerativeSource)
-
-    /// The underlying audio reference (embedded bytes or file path).
-    public var audio: AudioReference {
-        switch self {
-        case .sample(let s): return s.audio
-        case .generative(let g): return g.audio
-        }
-    }
-}
 
 /// A reference to source audio: embedded bytes (the session file is
 /// self-contained) or a path the host resolves.
@@ -91,8 +71,8 @@ public struct SampleSource: Sendable, Codable, Equatable {
     /// The audio.
     public var audio: AudioReference
 
-    /// Crossfades the tail into the head on resolve so the loop seam is
-    /// inaudible. Defaults to `true`.
+    /// Crossfades the tail into the head on resolve so loop tiling is
+    /// seamless. Defaults to `true`.
     public var seamlessLoop: Bool = true
 
     /// Creates a sample source.

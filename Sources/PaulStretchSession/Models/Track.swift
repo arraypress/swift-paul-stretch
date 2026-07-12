@@ -2,8 +2,8 @@
 //  Track.swift
 //  SwiftPaulStretch
 //
-//  One channel of a Session: a voice (sample or generative), its own effect
-//  stack, mixer state, loop phasing, and session-time automation.
+//  One lane of the arrangement: its clips, its channel strip, mixer state
+//  and session-time automation.
 //
 //  Created by David Sherlock on 7/12/26.
 //
@@ -16,15 +16,12 @@ import PaulStretchEffects
 // module on watchOS.
 #if !os(watchOS)
 
-/// One channel of a ``Session``.
+/// One lane of a ``Session``: an ordered set of ``Clip``s plus the channel.
 ///
-/// A track holds a single voice — its resolved audio (see
-/// ``SessionRenderer/renderVoice(for:sampleRate:isCancelled:)``) is placed
-/// on the timeline at ``startSeconds`` and, when ``loops`` is on, repeats at
-/// its own natural length until the session ends. Give tracks loops of
-/// *different* lengths (61 s against 47 s against 73 s) and the arrangement
-/// phases endlessly — generative structure with zero randomness at play
-/// time.
+/// The track's ``stack`` (its insert strip) is baked into each clip's voice
+/// — every clip gets its own effect tail. Gain, pan, mute and solo are the
+/// live mixer channel; ``gainLane``/``panLane`` automate them over the
+/// whole session.
 public struct Track: Sendable, Codable, Equatable, Identifiable {
 
     /// Stable identity.
@@ -33,19 +30,8 @@ public struct Track: Sendable, Codable, Equatable, Identifiable {
     /// The track name.
     public var name: String = "Track"
 
-    /// What this track plays.
-    public var source: TrackSource
-
-    /// When the track enters the timeline, in seconds.
-    public var startSeconds: Double = 0
-
-    /// Whether the voice repeats until the session ends (at its own length —
-    /// this is what makes loop phasing work). Off: the voice plays once.
-    public var loops: Bool = true
-
-    /// The initial offset into the loop, in seconds — set different phases
-    /// to keep several copies of one loop from starting in unison.
-    public var loopPhaseSeconds: Double = 0
+    /// The clips on this lane (any order; positions live on the clips).
+    public var clips: [Clip] = []
 
     /// Channel gain, linear (`1` = unity).
     public var gain: Float = 1
@@ -60,7 +46,7 @@ public struct Track: Sendable, Codable, Equatable, Identifiable {
     /// When any track is soloed, only soloed tracks sound.
     public var isSoloed: Bool = false
 
-    /// The track's channel strip, baked into its voice.
+    /// The track's channel strip, baked into each clip's voice.
     public var stack: EffectStack = EffectStack()
 
     /// Optional gain automation over the whole session (lane value `0…1`
@@ -73,29 +59,22 @@ public struct Track: Sendable, Codable, Equatable, Identifiable {
 
     /// Creates a track.
     ///
-    /// - Parameters:
-    ///   - name: The track name.
-    ///   - source: What the track plays.
-    public init(name: String = "Track", source: TrackSource) {
+    /// - Parameter name: The track name.
+    public init(name: String = "Track") {
         self.name = name
-        self.source = source
     }
 
     // MARK: Codable (tolerant — old session files survive new fields)
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, source, startSeconds, loops, loopPhaseSeconds
-        case gain, pan, isMuted, isSoloed, stack, gainLane, panLane
+        case id, name, clips, gain, pan, isMuted, isSoloed, stack, gainLane, panLane
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Track"
-        source = try c.decode(TrackSource.self, forKey: .source)
-        startSeconds = try c.decodeIfPresent(Double.self, forKey: .startSeconds) ?? 0
-        loops = try c.decodeIfPresent(Bool.self, forKey: .loops) ?? true
-        loopPhaseSeconds = try c.decodeIfPresent(Double.self, forKey: .loopPhaseSeconds) ?? 0
+        clips = try c.decodeIfPresent([Clip].self, forKey: .clips) ?? []
         gain = try c.decodeIfPresent(Float.self, forKey: .gain) ?? 1
         pan = try c.decodeIfPresent(Float.self, forKey: .pan) ?? 0
         isMuted = try c.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
