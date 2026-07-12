@@ -85,14 +85,39 @@ func makePureStages(sampleRate: Double,
         stages.append(ShimmerReverb(sampleRate: sampleRate, parameters: fx))
     }
     if fx.convolutionReverbEnabled {
-        stages.append(ConvolutionReverb(sampleRate: sampleRate,
-                                        profile: fx.convolutionReverbProfile,
-                                        decaySeconds: Double(fx.convolutionReverbDecaySeconds),
-                                        mix: fx.convolutionReverbMix,
-                                        mixLane: lanes["convolutionReverb.mix"],
-                                        totalFrames: total))
+        // A custom impulse (decoded from the embedded bytes) replaces the
+        // generated profile; decode failures fall back to the profile.
+        if let data = fx.convolutionReverbCustomIRData,
+           let impulse = decodeImpulse(data, sampleRate: sampleRate) {
+            stages.append(ConvolutionReverb(sampleRate: sampleRate,
+                                            impulse: impulse,
+                                            mix: fx.convolutionReverbMix,
+                                            mixLane: lanes["convolutionReverb.mix"],
+                                            totalFrames: total))
+        } else {
+            stages.append(ConvolutionReverb(sampleRate: sampleRate,
+                                            profile: fx.convolutionReverbProfile,
+                                            decaySeconds: Double(fx.convolutionReverbDecaySeconds),
+                                            mix: fx.convolutionReverbMix,
+                                            mixLane: lanes["convolutionReverb.mix"],
+                                            totalFrames: total))
+        }
     }
     return stages
+}
+
+/// Decodes embedded impulse-response bytes at the stream's sample rate
+/// (via a temp file — AVFoundation only decodes from URLs).
+func decodeImpulse(_ data: Data, sampleRate: Double) -> StereoBuffer? {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ps-ir-\(data.hashValue).audio")
+    do {
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try AudioFileIO.readStereo(url: url, sampleRate: sampleRate)
+    } catch {
+        return nil
+    }
 }
 
 /// Runs a whole buffer through a stage list, appending each stage's

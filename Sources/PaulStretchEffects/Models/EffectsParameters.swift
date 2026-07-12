@@ -195,6 +195,15 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// Wet/dry mix, `0…100`.
     public var convolutionReverbMix: Float = 35
 
+    /// A custom impulse response as encoded audio bytes (WAV/AIFF/anything
+    /// AVFoundation decodes). When set, it **replaces** the generated
+    /// profile — record a stairwell clap and drone inside it. Rides along
+    /// inside saved presets (base64 in the JSON).
+    public var convolutionReverbCustomIRData: Data? = nil
+
+    /// A display name for the custom impulse (the file it came from).
+    public var convolutionReverbCustomIRName: String? = nil
+
     // MARK: Sweep filter
 
     /// Whether the sweep filter is active (baked path — see ``SweepFilter``).
@@ -305,7 +314,8 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case shimmerEnabled, shimmerMix, shimmerPitch, shimmerFeedback,
              shimmerSize, shimmerDamping, shimmerClimbSeconds
         case convolutionReverbEnabled, convolutionReverbProfile,
-             convolutionReverbDecaySeconds, convolutionReverbMix
+             convolutionReverbDecaySeconds, convolutionReverbMix,
+             convolutionReverbCustomIRData, convolutionReverbCustomIRName
         case sweepFilterEnabled, sweepFilterShape, sweepFilterCutoff,
              sweepFilterResonance, sweepFilterBassCut,
              sweepFilterLFOPeriod, sweepFilterLFODepth
@@ -362,6 +372,8 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         convolutionReverbProfile = try c.decodeIfPresent(ReverbProfile.self, forKey: .convolutionReverbProfile) ?? convolutionReverbProfile
         convolutionReverbDecaySeconds = try c.decodeIfPresent(Float.self, forKey: .convolutionReverbDecaySeconds) ?? convolutionReverbDecaySeconds
         convolutionReverbMix = try c.decodeIfPresent(Float.self, forKey: .convolutionReverbMix) ?? convolutionReverbMix
+        convolutionReverbCustomIRData = try c.decodeIfPresent(Data.self, forKey: .convolutionReverbCustomIRData) ?? convolutionReverbCustomIRData
+        convolutionReverbCustomIRName = try c.decodeIfPresent(String.self, forKey: .convolutionReverbCustomIRName) ?? convolutionReverbCustomIRName
         sweepFilterEnabled = try c.decodeIfPresent(Bool.self, forKey: .sweepFilterEnabled) ?? sweepFilterEnabled
         sweepFilterShape = try c.decodeIfPresent(FilterShape.self, forKey: .sweepFilterShape) ?? sweepFilterShape
         sweepFilterCutoff = try c.decodeIfPresent(Float.self, forKey: .sweepFilterCutoff) ?? sweepFilterCutoff

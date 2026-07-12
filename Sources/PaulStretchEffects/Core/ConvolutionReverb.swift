@@ -59,6 +59,36 @@ public final class ConvolutionReverb: PureStage {
     private var wetBase = 0
     private var emitted = 0
 
+    /// Creates a convolution reverb over a **custom impulse response** —
+    /// any recorded or designed space (a stairwell clap, a spring tank, a
+    /// cassette of a cave). The impulse should already be at `sampleRate`;
+    /// it is truncated to 60 seconds.
+    ///
+    /// - Parameters:
+    ///   - sampleRate: The stream's sample rate, in hertz.
+    ///   - impulse: The impulse response to convolve with.
+    ///   - mix: Wet/dry mix, `0…100`.
+    ///   - mixLane: Optional mix automation (absolute `0…1`).
+    ///   - totalFrames: The full dry length (the lane's time base).
+    public init(sampleRate: Double,
+                impulse: StereoBuffer,
+                mix: Float,
+                mixLane: AutomationLane? = nil,
+                totalFrames: Int? = nil) {
+        self.sampleRate = sampleRate
+        let m = min(max(mix, 0), 100) / 100
+        self.wet = m
+        self.dry = 1 - m
+        self.mixLane = mixLane
+        self.totalFrames = totalFrames
+        let cap = Int(sampleRate * 60)
+        let irL = Array(impulse.l.prefix(cap))
+        let irR = Array(impulse.r.prefix(cap))
+        self.irFrames = max(1, irL.count)
+        self.convL = PartitionedConvolver(impulse: irL.isEmpty ? [1] : irL, blockSize: blockSize)
+        self.convR = PartitionedConvolver(impulse: irR.isEmpty ? [1] : irR, blockSize: blockSize)
+    }
+
     /// Creates a convolution reverb.
     ///
     /// - Parameters:
@@ -100,23 +130,33 @@ public final class ConvolutionReverb: PureStage {
         let brightness: Double          // one-pole LP coefficient on the noise
         let lowBoost: Double            // dedicated low layer amount
         let earlyReflectionsDensity: Double
+        /// How far the brightness coefficient falls by the end of the tail
+        /// (fraction of its start value). Real rooms darken as they decay —
+        /// highs die faster than lows — so the noise field's low-pass slides
+        /// down across the IR instead of holding still.
+        let darkening: Double
     }
 
     private static func profileTable(_ p: ReverbProfile) -> Profile {
         switch p {
         case .plate:
             return Profile(preDelay: 0.0, decayCurve: 3.2, brightness: 0.92,
-                           lowBoost: 0.0, earlyReflectionsDensity: 0.6)
+                           lowBoost: 0.0, earlyReflectionsDensity: 0.6,
+                           darkening: 0.45)
         case .hall:
             return Profile(preDelay: 0.035, decayCurve: 1.8, brightness: 0.62,
-                           lowBoost: 0.25, earlyReflectionsDensity: 0.25)
+                           lowBoost: 0.25, earlyReflectionsDensity: 0.25,
+                           darkening: 0.22)
         case .cathedral:
             return Profile(preDelay: 0.08, decayCurve: 1.2, brightness: 0.4,
-                           lowBoost: 0.55, earlyReflectionsDensity: 0.15)
+                           lowBoost: 0.55, earlyReflectionsDensity: 0.15,
+                           darkening: 0.12)
         case .exponential:
-            // Handled separately (pure exponential-approach wash).
+            // Handled separately (pure exponential-approach wash — kept
+            // spectrally flat on purpose; that IS its character).
             return Profile(preDelay: 0.01, decayCurve: 0, brightness: 1,
-                           lowBoost: 0, earlyReflectionsDensity: 0)
+                           lowBoost: 0, earlyReflectionsDensity: 0,
+                           darkening: 1)
         }
     }
 
@@ -181,7 +221,10 @@ public final class ConvolutionReverb: PureStage {
                 for i in preFrames..<length {
                     let t = Double(i - preFrames) / Double(decayFrames)
                     let env = pow(1 - t, p.decayCurve)
-                    lpState = p.brightness * noise() + (1 - p.brightness) * lpState
+                    // Frequency-dependent decay: the low-pass closes down
+                    // exponentially over the tail, so highs die first.
+                    let a = p.brightness * pow(p.darkening, t)
+                    lpState = a * noise() + (1 - a) * lpState
                     var lowLayer = 0.0
                     if p.lowBoost > 0 {
                         lowState = lowAlpha * noise() + (1 - lowAlpha) * lowState

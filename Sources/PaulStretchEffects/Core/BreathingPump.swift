@@ -82,15 +82,28 @@ public final class BreathingPump: PureStage {
             let d = baseDepth * laneV
             let gL = 1 + d * sin(phaseL)
             let gR = 1 + d * sin(phaseR)
-            // Soft-clip the up-swing so peak-normalised material can't fizz.
-            outL[i] = tanhf(Float(Double(l[i]) * gL))
-            outR[i] = tanhf(Float(Double(r[i]) * gR))
+            // Transparent below the knee; only the up-swing's overshoot is
+            // rounded (an unconditional tanh would colour everything).
+            outL[i] = Self.kneeClip(Float(Double(l[i]) * gL))
+            outR[i] = Self.kneeClip(Float(Double(r[i]) * gR))
         }
         position += n
         return (outL, outR)
     }
 
     public func tail() -> (l: [Float], r: [Float]) { ([], []) }
+
+    /// Identity below ±0.9; the overshoot is folded through a tanh that
+    /// asymptotes at ±1.0. Bit-transparent for everything under the knee.
+    @inline(__always)
+    static func kneeClip(_ x: Float) -> Float {
+        let knee: Float = 0.9
+        let a = abs(x)
+        if a <= knee { return x }
+        let excess = (a - knee) / 0.1
+        let clipped = knee + 0.1 * tanhf(excess)
+        return x < 0 ? -clipped : clipped
+    }
 }
 
 #endif  // !os(watchOS)

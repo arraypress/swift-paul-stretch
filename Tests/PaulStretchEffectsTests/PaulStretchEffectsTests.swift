@@ -674,6 +674,87 @@ final class PaulStretchEffectsTests: XCTestCase {
         XCTAssertTrue(seesaw, "auto-pan must swing energy between channels")
     }
 
+    func testReverbTailDarkensOverTime() {
+        // Frequency-dependent decay, measured on the IR itself: the late
+        // segment's high-frequency share must fall well below the early
+        // segment's.
+        let (ir, _) = ConvolutionReverb.makeImpulseResponse(profile: .hall,
+                                                            decaySeconds: 4,
+                                                            sampleRate: 44_100,
+                                                            seed: 0xABCD)
+        let win = Int(0.4 * 44_100)
+        func hfShare(_ at: Int) -> Double {
+            let hi = goertzelPower(ir[at..<(at + win)], hz: 6000, sampleRate: 44_100)
+            let lo = goertzelPower(ir[at..<(at + win)], hz: 250, sampleRate: 44_100)
+            return hi / max(lo + hi, 1e-18)
+        }
+        let early = hfShare(Int(0.1 * 44_100))
+        let late = hfShare(Int(2.8 * 44_100))
+        XCTAssertLessThan(late, early * 0.4,
+                          "the IR must darken as it decays (highs die first)")
+    }
+
+    func testPumpIsTransparentBelowTheKnee() {
+        // A quiet tone through a shallow pump must come back as EXACTLY
+        // input × gain — no soft-clip colouration below the knee.
+        let dry = tone(seconds: 0.5, hz: 440)     // 0.4 peak, ×1.05 max well under 0.9
+        var fx = EffectsParameters()
+        fx.pumpEnabled = true
+        fx.pumpDepth = 0.2
+        fx.pumpRateHz = 1
+        let wet = EffectsBaker.bake(dry, effects: fx)
+        // No added harmonic distortion: the 2nd harmonic must stay under
+        // −50 dB relative to the fundamental (AM sidebands at ±1 Hz leak a
+        // little into any bin, so the bound is absolute, not dry-relative).
+        let h1 = goertzelPower(wet.l[4410..<17_640], hz: 440, sampleRate: 44_100)
+        let h2 = goertzelPower(wet.l[4410..<17_640], hz: 880, sampleRate: 44_100)
+        XCTAssertLessThan(h2, h1 * 1e-5,
+                          "a shallow pump must not add harmonic distortion")
+        XCTAssertEqual(BreathingPump.kneeClip(0.5), 0.5, "identity below the knee")
+        XCTAssertLessThanOrEqual(BreathingPump.kneeClip(2.0), 1.0, "asymptote at 1")
+    }
+
+    func testCustomImpulseIdentityAndRoundTrip() throws {
+        // A unit impulse as custom IR → convolution is identity: at 100%
+        // wet the output equals the input exactly (after the block flush).
+        let dry = tone(seconds: 0.5)
+        var impulse = StereoBuffer(silenceFrames: 512, sampleRate: 44_100)
+        impulse.l[0] = 1; impulse.r[0] = 1
+
+        // Via the direct initialiser:
+        let reverb = ConvolutionReverb(sampleRate: 44_100, impulse: impulse, mix: 100)
+        var out = reverb.process(l: dry.l, r: dry.r)
+        let flush = reverb.tail()
+        out.l.append(contentsOf: flush.l)
+        out.r.append(contentsOf: flush.r)
+        for i in stride(from: 0, to: dry.frameCount, by: 997) {
+            XCTAssertEqual(out.l[i], dry.l[i], accuracy: 2e-4,
+                           "unit-impulse convolution must be identity at frame \(i)")
+        }
+
+        // Via embedded bytes in the parameters (the preset path):
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ir-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try AudioFileIO.writeWAV(impulse, to: url)
+        var fx = EffectsParameters()
+        fx.convolutionReverbEnabled = true
+        fx.convolutionReverbCustomIRData = try Data(contentsOf: url)
+        fx.convolutionReverbCustomIRName = "unit"
+        fx.convolutionReverbMix = 100
+        let baked = EffectsBaker.bake(dry, effects: fx)
+        XCTAssertGreaterThan(baked.frameCount, dry.frameCount, "flush appends the IR length")
+        for i in stride(from: 4410, to: dry.frameCount, by: 997) {
+            XCTAssertEqual(baked.l[i], dry.l[i], accuracy: 2e-3,
+                           "embedded unit IR must pass audio through (24-bit file quantisation)")
+        }
+        // The IR bytes survive preset JSON.
+        let decoded = try JSONDecoder().decode(EffectsParameters.self,
+                                               from: JSONEncoder().encode(fx))
+        XCTAssertEqual(decoded.convolutionReverbCustomIRData, fx.convolutionReverbCustomIRData)
+        XCTAssertEqual(decoded.convolutionReverbCustomIRName, "unit")
+    }
+
     func testAutomationLaneSpline() {
         let lane = AutomationLane(points: [
             AutomationPoint(t: 0, v: 0),

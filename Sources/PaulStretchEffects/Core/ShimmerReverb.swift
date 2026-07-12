@@ -141,9 +141,11 @@ public final class ShimmerReverb {
         let mask = psWindow - 1
 
         for i in 0..<n {
-            // --- Pitch-shifted feedback: two taps crossfaded over the window.
-            // The tap phase drifts at (1 − ratio) per sample; each tap's gain
-            // fades to zero exactly where its read pointer jumps.
+            // --- Pitch-shifted feedback: two taps crossfaded over the
+            // window. (A 4-tap variant was tried and measurably DILUTED the
+            // octave bloom — three simultaneously-active taps comb-filter
+            // the pitched content. The real upgrade here is a grain-based
+            // shifter; until then the dual-tap's character stands.)
             psPhase += 1 - pitchRatio
             psPhase -= Double(psWindow) * (psPhase / Double(psWindow)).rounded(.down)
             let dA = psPhase

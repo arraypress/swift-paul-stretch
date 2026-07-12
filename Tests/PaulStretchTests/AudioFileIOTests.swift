@@ -128,6 +128,34 @@ final class AudioFileIOTests: XCTestCase {
         }
     }
 
+    // MARK: - Loudness (EBU R128)
+
+    func testIntegratedLoudnessOfReferenceSine() {
+        // BS.1770 reference: a 0 dBFS 997 Hz sine in ONE channel reads
+        // −3.01 LUFS, so both channels at −6.02 dBFS read ≈ −6.0 LUFS
+        // (the −0.691 offset cancels the K-filter's gain at 1 kHz).
+        let sr = 44_100.0
+        let n = Int(sr * 5)
+        var l = [Float](repeating: 0, count: n)
+        for i in 0..<n { l[i] = 0.5 * Float(sin(2 * Double.pi * 997 * Double(i) / sr)) }
+        let sine = StereoBuffer(l: l, r: l, sampleRate: sr)
+        guard let lufs = Loudness.integrated(of: sine) else { return XCTFail("gated to silence") }
+        XCTAssertEqual(lufs, -6.0, accuracy: 0.5)
+        XCTAssertNil(Loudness.integrated(of: StereoBuffer(silenceFrames: n, sampleRate: sr)),
+                     "silence must gate out entirely")
+    }
+
+    func testLoudnessNormalizationHitsTheTarget() {
+        let quiet = TestSignals.source(seconds: 5).peakNormalized(to: 0.1)
+        let levelled = Loudness.normalize(quiet, toLUFS: -18)
+        guard let lufs = Loudness.integrated(of: levelled) else { return XCTFail() }
+        XCTAssertEqual(lufs, -18, accuracy: 0.5)
+        // Peak safety: a hot target on quiet material must not clip.
+        let hot = Loudness.normalize(quiet, toLUFS: 0)
+        let peak = hot.l.reduce(Float(0)) { max($0, abs($1)) }
+        XCTAssertLessThanOrEqual(peak, 0.981, "the ceiling must hold")
+    }
+
     // MARK: - PCM bridging
 
     func testMakePCMBufferCopiesBothChannels() throws {
