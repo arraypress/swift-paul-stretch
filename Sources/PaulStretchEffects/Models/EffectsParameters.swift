@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import PaulStretch
 
 // The AVAudioUnit effect classes do not exist on watchOS — this product
 // compiles to an empty module there. The PaulStretch core is unaffected.
@@ -178,17 +179,112 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// `1`–`3` s turns it into a slow, deliberate ascent.
     public var shimmerClimbSeconds: Float = 0
 
+    // MARK: Convolution reverb (algorithmic impulse responses)
+
+    /// Whether the convolution reverb is active (baked path — see
+    /// ``ConvolutionReverb``).
+    public var convolutionReverbEnabled = false
+
+    /// The impulse-response character. See ``ReverbProfile``.
+    public var convolutionReverbProfile: ReverbProfile = .hall
+
+    /// The reverb decay, in seconds (`0.1…30`) — the control the stock
+    /// reverb doesn't have.
+    public var convolutionReverbDecaySeconds: Float = 6
+
+    /// Wet/dry mix, `0…100`.
+    public var convolutionReverbMix: Float = 35
+
+    // MARK: Sweep filter
+
+    /// Whether the sweep filter is active (baked path — see ``SweepFilter``).
+    public var sweepFilterEnabled = false
+
+    /// The response shape.
+    public var sweepFilterShape: FilterShape = .lowPass
+
+    /// Static cutoff, in hertz (`20…20000`).
+    public var sweepFilterCutoff: Float = 1200
+
+    /// Resonance Q (`0.5…12`).
+    public var sweepFilterResonance: Float = 2
+
+    /// A companion high-pass ahead of the main filter, in hertz; `0`
+    /// disables it.
+    public var sweepFilterBassCut: Float = 0
+
+    /// The LFO sweep period, in seconds (`1…120`).
+    public var sweepFilterLFOPeriod: Float = 20
+
+    /// The LFO sweep depth in ± octaves around the cutoff; `0` disables
+    /// the LFO.
+    public var sweepFilterLFODepth: Float = 0
+
+    // MARK: Tape wow & flutter
+
+    /// Whether wow/flutter is active (baked path — see ``WowFlutter``).
+    public var wowEnabled = false
+
+    /// Intensity `0…1` (±0.5 % pitch deviation at `1`).
+    public var wowAmount: Float = 0.5
+
+    /// The wow rate, in hertz (`0.05…8`); flutter runs at 10×.
+    public var wowRateHz: Float = 0.6
+
+    // MARK: Breathing pump
+
+    /// Whether the breathing pump is active (baked path — see
+    /// ``BreathingPump``).
+    public var pumpEnabled = false
+
+    /// Swell depth `0…1` (`1` = ±25 % gain).
+    public var pumpDepth: Float = 0.5
+
+    /// The breath rate, in hertz (`0.02…14` — tidal to tremolo).
+    public var pumpRateHz: Float = 0.05
+
+    // MARK: Auto-pan
+
+    /// Whether the auto-pan is active (baked path — see ``AutoPan``).
+    public var autoPanEnabled = false
+
+    /// Sweep width `0…1`.
+    public var autoPanDepth: Float = 0.6
+
+    /// The sweep rate, in hertz (`0.01…8`).
+    public var autoPanRateHz: Float = 0.03
+
+    // MARK: Automation lanes
+
+    /// Parameter automation over the render's timeline, keyed by target.
+    ///
+    /// Supported keys: `"sweepFilter.cutoff"`, `"sweepFilter.resonance"`,
+    /// `"wow.amount"`, `"wow.rate"`, `"pump.depth"`, `"pump.rate"`,
+    /// `"autoPan.depth"`, `"autoPan.rate"`, `"convolutionReverb.mix"`.
+    /// Unknown keys are ignored. Lanes evaluate against the dry render's
+    /// full length; see ``AutomationLane`` for curve semantics.
+    public var parameterLanes: [String: AutomationLane] = [:]
+
     /// `true` when any effect on the stock `AVAudioUnit` chain is enabled
-    /// (everything except the shimmer, which is the library's own DSP).
+    /// (everything except the library's own pure-DSP stages).
     public var isStockChainEnabled: Bool {
         reverbEnabled || eqEnabled || filterEnabled || delayEnabled
             || distortionEnabled || compressorEnabled || limiterEnabled
     }
 
+    /// `true` when any of the library's own pure-DSP stages is enabled
+    /// (shimmer, convolution reverb, sweep filter, wow, pump, auto-pan).
+    /// These run in the baked path only — they can't sit on a live
+    /// `AVAudioEngine` graph.
+    public var isPureDSPEnabled: Bool {
+        shimmerEnabled || convolutionReverbEnabled || sweepFilterEnabled
+            || wowEnabled || pumpEnabled || autoPanEnabled
+    }
+
     /// `true` when at least one effect is enabled — baking with everything
     /// off is a no-op and returns the dry audio untouched.
     public var isAnyEnabled: Bool {
-        isStockChainEnabled || shimmerEnabled
+        isStockChainEnabled || isPureDSPEnabled
     }
 
     /// Creates the all-off default settings.
@@ -208,6 +304,15 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case limiterEnabled, limiterPreGain, limiterAttack, limiterDecay
         case shimmerEnabled, shimmerMix, shimmerPitch, shimmerFeedback,
              shimmerSize, shimmerDamping, shimmerClimbSeconds
+        case convolutionReverbEnabled, convolutionReverbProfile,
+             convolutionReverbDecaySeconds, convolutionReverbMix
+        case sweepFilterEnabled, sweepFilterShape, sweepFilterCutoff,
+             sweepFilterResonance, sweepFilterBassCut,
+             sweepFilterLFOPeriod, sweepFilterLFODepth
+        case wowEnabled, wowAmount, wowRateHz
+        case pumpEnabled, pumpDepth, pumpRateHz
+        case autoPanEnabled, autoPanDepth, autoPanRateHz
+        case parameterLanes
     }
 
     /// Tolerant decoding: any field missing from the JSON (a preset saved
@@ -253,6 +358,27 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         shimmerSize = try c.decodeIfPresent(Float.self, forKey: .shimmerSize) ?? shimmerSize
         shimmerDamping = try c.decodeIfPresent(Float.self, forKey: .shimmerDamping) ?? shimmerDamping
         shimmerClimbSeconds = try c.decodeIfPresent(Float.self, forKey: .shimmerClimbSeconds) ?? shimmerClimbSeconds
+        convolutionReverbEnabled = try c.decodeIfPresent(Bool.self, forKey: .convolutionReverbEnabled) ?? convolutionReverbEnabled
+        convolutionReverbProfile = try c.decodeIfPresent(ReverbProfile.self, forKey: .convolutionReverbProfile) ?? convolutionReverbProfile
+        convolutionReverbDecaySeconds = try c.decodeIfPresent(Float.self, forKey: .convolutionReverbDecaySeconds) ?? convolutionReverbDecaySeconds
+        convolutionReverbMix = try c.decodeIfPresent(Float.self, forKey: .convolutionReverbMix) ?? convolutionReverbMix
+        sweepFilterEnabled = try c.decodeIfPresent(Bool.self, forKey: .sweepFilterEnabled) ?? sweepFilterEnabled
+        sweepFilterShape = try c.decodeIfPresent(FilterShape.self, forKey: .sweepFilterShape) ?? sweepFilterShape
+        sweepFilterCutoff = try c.decodeIfPresent(Float.self, forKey: .sweepFilterCutoff) ?? sweepFilterCutoff
+        sweepFilterResonance = try c.decodeIfPresent(Float.self, forKey: .sweepFilterResonance) ?? sweepFilterResonance
+        sweepFilterBassCut = try c.decodeIfPresent(Float.self, forKey: .sweepFilterBassCut) ?? sweepFilterBassCut
+        sweepFilterLFOPeriod = try c.decodeIfPresent(Float.self, forKey: .sweepFilterLFOPeriod) ?? sweepFilterLFOPeriod
+        sweepFilterLFODepth = try c.decodeIfPresent(Float.self, forKey: .sweepFilterLFODepth) ?? sweepFilterLFODepth
+        wowEnabled = try c.decodeIfPresent(Bool.self, forKey: .wowEnabled) ?? wowEnabled
+        wowAmount = try c.decodeIfPresent(Float.self, forKey: .wowAmount) ?? wowAmount
+        wowRateHz = try c.decodeIfPresent(Float.self, forKey: .wowRateHz) ?? wowRateHz
+        pumpEnabled = try c.decodeIfPresent(Bool.self, forKey: .pumpEnabled) ?? pumpEnabled
+        pumpDepth = try c.decodeIfPresent(Float.self, forKey: .pumpDepth) ?? pumpDepth
+        pumpRateHz = try c.decodeIfPresent(Float.self, forKey: .pumpRateHz) ?? pumpRateHz
+        autoPanEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoPanEnabled) ?? autoPanEnabled
+        autoPanDepth = try c.decodeIfPresent(Float.self, forKey: .autoPanDepth) ?? autoPanDepth
+        autoPanRateHz = try c.decodeIfPresent(Float.self, forKey: .autoPanRateHz) ?? autoPanRateHz
+        parameterLanes = try c.decodeIfPresent([String: AutomationLane].self, forKey: .parameterLanes) ?? parameterLanes
     }
 }
 

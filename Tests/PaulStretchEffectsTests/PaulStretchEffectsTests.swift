@@ -498,6 +498,198 @@ final class PaulStretchEffectsTests: XCTestCase {
                        "a different unit count must be rejected")
     }
 
+    // MARK: - Ambient suite (convolution reverb / sweep filter / wow / pump / auto-pan)
+
+    func testConvolutionReverbDecaysOverItsDecayTime() {
+        let dry = tone(seconds: 0.5)
+        var fx = EffectsParameters()
+        fx.convolutionReverbEnabled = true
+        fx.convolutionReverbProfile = .hall
+        fx.convolutionReverbDecaySeconds = 3
+        fx.convolutionReverbMix = 100
+        let wet = EffectsBaker.bake(dry, effects: fx)
+
+        // Output = dry length + ~(decay + preDelay) ring-out.
+        XCTAssertGreaterThan(wet.frameCount, dry.frameCount + Int(2.5 * 44_100))
+        // The tail must decay: early tail loud, late tail quiet.
+        let tailStart = dry.frameCount
+        let early = rms(wet.l[tailStart..<(tailStart + 22_050)])
+        let late = rms(wet.l[(wet.frameCount - 22_050)...])
+        XCTAssertGreaterThan(early, late * 5, "the reverb tail must decay")
+        XCTAssertFalse(wet.l.contains { $0.isNaN })
+
+        // Deterministic: same settings, same room, bit for bit.
+        let again = EffectsBaker.bake(dry, effects: fx)
+        XCTAssertEqual(wet.l, again.l, "seeded IRs must reproduce exactly")
+    }
+
+    func testConvolutionReverbStreamingMatchesWholeBake() {
+        let dry = tone(seconds: 1.0)
+        var fx = EffectsParameters()
+        fx.convolutionReverbEnabled = true
+        fx.convolutionReverbDecaySeconds = 2
+        fx.convolutionReverbMix = 50
+
+        let whole = EffectsBaker.bake(dry, effects: fx)
+        guard let baker = StreamingEffectsBaker(sampleRate: dry.sampleRate, effects: fx,
+                                                totalInputFrames: dry.frameCount) else {
+            return XCTFail("streaming setup failed")
+        }
+        var outL: [Float] = []
+        var pos = 0
+        while pos < dry.frameCount {
+            let end = min(dry.frameCount, pos + 11_111)
+            let wet = baker.process(l: Array(dry.l[pos..<end]), r: Array(dry.r[pos..<end]))
+            outL.append(contentsOf: wet.l)
+            pos = end
+        }
+        outL.append(contentsOf: baker.finish().l)
+        XCTAssertEqual(outL.count, whole.frameCount, "streamed length must match")
+        XCTAssertEqual(outL, whole.l, "pure-DSP convolution must stream bit-identically")
+    }
+
+    func testSweepFilterShapesAndLFO() {
+        let sr = 44_100.0
+        // Two tones: 200 Hz + 6 kHz.
+        let n = Int(sr * 2)
+        var l = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let t = Double(i) / sr
+            l[i] = Float(0.3 * sin(2 * .pi * 200 * t) + 0.3 * sin(2 * .pi * 6000 * t))
+        }
+        let dry = StereoBuffer(l: l, r: l, sampleRate: sr)
+
+        var lp = EffectsParameters()
+        lp.sweepFilterEnabled = true
+        lp.sweepFilterShape = .lowPass
+        lp.sweepFilterCutoff = 500
+        let lowPassed = EffectsBaker.bake(dry, effects: lp)
+        let hfDry = goertzelPower(dry.l[8820..<52_920], hz: 6000, sampleRate: sr)
+        let hfWet = goertzelPower(lowPassed.l[8820..<52_920], hz: 6000, sampleRate: sr)
+        XCTAssertLessThan(hfWet, hfDry * 0.05, "a 500 Hz low-pass must gut 6 kHz")
+
+        var hp = lp
+        hp.sweepFilterShape = .highPass
+        hp.sweepFilterCutoff = 2000
+        let highPassed = EffectsBaker.bake(dry, effects: hp)
+        let lfDry = goertzelPower(dry.l[8820..<52_920], hz: 200, sampleRate: sr)
+        let lfWet = goertzelPower(highPassed.l[8820..<52_920], hz: 200, sampleRate: sr)
+        XCTAssertLessThan(lfWet, lfDry * 0.05, "a 2 kHz high-pass must gut 200 Hz")
+
+        // LFO: cutoff breathing 2 octaves around 800 Hz varies 6 kHz energy
+        // over time (open vs closed halves of the sweep differ hugely).
+        var swept = lp
+        swept.sweepFilterCutoff = 800
+        swept.sweepFilterLFODepth = 3
+        swept.sweepFilterLFOPeriod = 2
+        let breathing = EffectsBaker.bake(dry, effects: swept)
+        var minHF = Double.infinity
+        var maxHF = 0.0
+        var s = 0
+        while s + 11_025 <= breathing.frameCount {
+            let p = goertzelPower(breathing.l[s..<(s + 11_025)], hz: 6000, sampleRate: sr)
+            minHF = min(minHF, p); maxHF = max(maxHF, p)
+            s += 11_025
+        }
+        XCTAssertGreaterThan(maxHF, minHF * 20 + 1e-12, "the LFO must open and close audibly")
+    }
+
+    func testSweepFilterCutoffLaneOpensOverTime() {
+        let sr = 44_100.0
+        let n = Int(sr * 2)
+        var l = [Float](repeating: 0, count: n)
+        for i in 0..<n { l[i] = Float(0.3 * sin(2 * .pi * 6000 * Double(i) / sr)) }
+        let dry = StereoBuffer(l: l, r: l, sampleRate: sr)
+
+        var fx = EffectsParameters()
+        fx.sweepFilterEnabled = true
+        fx.sweepFilterShape = .lowPass
+        fx.sweepFilterCutoff = 500          // the lane REPLACES this
+        fx.parameterLanes["sweepFilter.cutoff"] = AutomationLane(points: [
+            AutomationPoint(t: 0, v: 0.2),   // ~110 Hz — closed
+            AutomationPoint(t: 1, v: 1.0),   // 18 kHz — open
+        ])
+        let wet = EffectsBaker.bake(dry, effects: fx)
+        let early = goertzelPower(wet.l[4410..<26_460], hz: 6000, sampleRate: sr)
+        let late = goertzelPower(wet.l[(n - 26_460)..<(n - 4410)], hz: 6000, sampleRate: sr)
+        XCTAssertGreaterThan(late, early * 20 + 1e-12,
+                             "the cutoff lane must open the filter over the render")
+    }
+
+    func testWowWobblesThePitch() {
+        let dry = tone(seconds: 2.0, hz: 440)
+        var fx = EffectsParameters()
+        fx.wowEnabled = true
+        fx.wowAmount = 1
+        fx.wowRateHz = 0.5
+        let wet = EffectsBaker.bake(dry, effects: fx)
+        XCTAssertEqual(wet.frameCount, dry.frameCount)
+        // Instantaneous frequency must vary: measure the spread of the
+        // intervals between successive rising zero crossings.
+        var lastCross = -1
+        var minGap = Int.max, maxGap = 0
+        for i in 44_100..<(wet.frameCount - 4410) where wet.l[i - 1] < 0 && wet.l[i] >= 0 {
+            if lastCross >= 0 {
+                let gap = i - lastCross
+                minGap = min(minGap, gap); maxGap = max(maxGap, gap)
+            }
+            lastCross = i
+        }
+        XCTAssertGreaterThan(Double(maxGap), Double(minGap) * 1.02,
+                             "wow must wobble the instantaneous pitch by over 2%")
+        XCTAssertFalse(wet.l.contains { $0.isNaN })
+    }
+
+    func testPumpBreathesAndAutoPanDrifts() {
+        let dry = tone(seconds: 2.0)
+        var pump = EffectsParameters()
+        pump.pumpEnabled = true
+        pump.pumpDepth = 1
+        pump.pumpRateHz = 1
+        let breathed = EffectsBaker.bake(dry, effects: pump)
+        var minRMS = Float.greatestFiniteMagnitude
+        var maxRMS: Float = 0
+        var s = 0
+        while s + 4410 <= breathed.frameCount {
+            let v = rms(breathed.l[s..<(s + 4410)])
+            minRMS = min(minRMS, v); maxRMS = max(maxRMS, v)
+            s += 4410
+        }
+        XCTAssertGreaterThan(maxRMS, minRMS * 1.3, "the pump must swell audibly")
+
+        var pan = EffectsParameters()
+        pan.autoPanEnabled = true
+        pan.autoPanDepth = 1
+        pan.autoPanRateHz = 1
+        let drifted = EffectsBaker.bake(dry, effects: pan)
+        // L and R energy must seesaw: correlation of window RMS should dip.
+        var seesaw = false
+        s = 0
+        while s + 4410 <= drifted.frameCount {
+            let lv = rms(drifted.l[s..<(s + 4410)])
+            let rv = rms(drifted.r[s..<(s + 4410)])
+            if lv > rv * 1.5 || rv > lv * 1.5 { seesaw = true }
+            s += 4410
+        }
+        XCTAssertTrue(seesaw, "auto-pan must swing energy between channels")
+    }
+
+    func testAutomationLaneSpline() {
+        let lane = AutomationLane(points: [
+            AutomationPoint(t: 0, v: 0),
+            AutomationPoint(t: 0.5, v: 1),
+            AutomationPoint(t: 1, v: 0),
+        ])
+        XCTAssertEqual(lane.value(at: -1), 0)
+        XCTAssertEqual(lane.value(at: 0), 0)
+        XCTAssertEqual(lane.value(at: 0.5), 1, accuracy: 1e-9)
+        XCTAssertEqual(lane.value(at: 2), 0)
+        XCTAssertGreaterThan(lane.value(at: 0.25), 0.3, "spline must rise smoothly")
+        // Tension 1 → tight (no overshoot past anchors).
+        let tight = AutomationLane(points: lane.points, tension: 1)
+        XCTAssertLessThanOrEqual(tight.value(at: 0.25), 1.0)
+    }
+
     // MARK: - Settings
 
     func testEffectsParametersRoundTripThroughJSON() throws {

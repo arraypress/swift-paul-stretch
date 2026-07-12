@@ -50,8 +50,9 @@ public final class StreamingEffectsBaker {
     /// Whether any stock `AVAudioUnit` effect is active (shimmer alone runs
     /// without the offline engine).
     private let stockActive: Bool
-    /// The shimmer stage, applied ahead of the stock chain.
-    private var shimmer: ShimmerReverb?
+    /// The pure-DSP stages (wow/filter/pump/pan/shimmer/convolution),
+    /// applied in order ahead of the stock chain.
+    private var stages: [PureStage] = []
     private var finished = false
     /// The player starts only after the first buffer is queued — starting it
     /// earlier makes the node render silence until the next quantum and
@@ -61,9 +62,12 @@ public final class StreamingEffectsBaker {
     /// Always left ≥ one chunk between calls so the queue never drains.
     private var pendingFrames = 0
 
-    /// The tail ``finish()`` will render, in seconds — ``EffectsBaker/tailSeconds``
-    /// when reverb or delay is active, otherwise `0`.
+    /// The tail ``finish()`` will render, in seconds — the pure stages'
+    /// ring-outs plus ``EffectsBaker/tailSeconds`` when reverb or delay is
+    /// active.
     public let tailSeconds: Double
+    /// The stock chain's own share of the tail.
+    private var stockTailSeconds: Double = 0
 
     /// Creates a streaming baker, or returns `nil` when the offline engine
     /// cannot be configured.
@@ -74,16 +78,19 @@ public final class StreamingEffectsBaker {
     /// - Parameters:
     ///   - sampleRate: The stream's sample rate, in hertz.
     ///   - effects: The effect settings to bake.
-    public init?(sampleRate: Double, effects: EffectsParameters) {
+    public init?(sampleRate: Double, effects: EffectsParameters, totalInputFrames: Int? = nil) {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return nil }
         self.format = format
         self.passthrough = !effects.isAnyEnabled
         self.stockActive = effects.isStockChainEnabled
         self.tailSeconds = (effects.shimmerEnabled ? ShimmerReverb.tailSeconds : 0)
+            + (effects.convolutionReverbEnabled ? Double(min(max(effects.convolutionReverbDecaySeconds, 0.1), 30)) : 0)
             + ((effects.reverbEnabled || effects.delayEnabled) ? EffectsBaker.tailSeconds : 0)
-        if effects.shimmerEnabled {
-            self.shimmer = ShimmerReverb(sampleRate: sampleRate, parameters: effects)
+        if effects.isPureDSPEnabled {
+            self.stages = makePureStages(sampleRate: sampleRate, effects: effects,
+                                         totalFrames: totalInputFrames)
         }
+        self.stockTailSeconds = (effects.reverbEnabled || effects.delayEnabled) ? EffectsBaker.tailSeconds : 0
         guard stockActive else { return }
 
         engine.attach(player)
@@ -124,9 +131,12 @@ public final class StreamingEffectsBaker {
         let n = min(l.count, r.count)
         if passthrough || finished || n == 0 { return (l, r) }
 
-        // Shimmer stage first (stateful pure DSP — no latency of its own).
-        let staged = shimmer?.process(l: l, r: r) ?? (l: l, r: r)
+        // The pure-DSP stages first (stateful — chunk order matters). A
+        // stage may withhold unfinalised frames, so track the staged count.
+        var staged: (l: [Float], r: [Float]) = (l: l, r: r)
+        for stage in stages { staged = stage.process(l: staged.l, r: staged.r) }
         guard stockActive else { return staged }
+        if staged.l.isEmpty { return (l: [], r: []) }
 
         guard let inBuf = AudioFileIO.makePCMBuffer(
             StereoBuffer(l: staged.l, r: staged.r, sampleRate: format.sampleRate),
@@ -137,7 +147,7 @@ public final class StreamingEffectsBaker {
         // Pull everything scheduled before this chunk; leave this chunk
         // queued so the player never starves between calls.
         let toRender = pendingFrames
-        pendingFrames = n
+        pendingFrames = staged.l.count
         guard toRender > 0 else { return ([], []) }
         return renderFrames(toRender) ?? (l: [], r: [])
     }
@@ -152,8 +162,17 @@ public final class StreamingEffectsBaker {
         if passthrough || finished { return ([], []) }
         finished = true
 
-        // The shimmer's own ring-out becomes the final input to the chain.
-        let ring = shimmer?.tail() ?? (l: [], r: [])
+        // Cascade the stages' ring-outs: each tail flows through the
+        // stages after it, exactly as a whole-buffer bake would order it.
+        var ring: (l: [Float], r: [Float]) = (l: [], r: [])
+        for (i, stage) in stages.enumerated() {
+            var t = stage.tail()
+            for later in stages[(i + 1)...] where !t.l.isEmpty {
+                t = later.process(l: t.l, r: t.r)
+            }
+            ring.l.append(contentsOf: t.l)
+            ring.r.append(contentsOf: t.r)
+        }
         guard stockActive else { return ring }
         defer { engine.stop() }
 
@@ -166,9 +185,7 @@ public final class StreamingEffectsBaker {
             pendingFrames += ring.l.count
         }
 
-        let engineTail = (tailSeconds > 0)
-            ? Int((tailSeconds - (shimmer != nil ? ShimmerReverb.tailSeconds : 0)) * format.sampleRate)
-            : 0
+        let engineTail = stockTailSeconds > 0 ? Int(stockTailSeconds * format.sampleRate) : 0
         let toRender = pendingFrames + max(0, engineTail)
         pendingFrames = 0
         guard toRender > 0 else { return ([], []) }
@@ -239,7 +256,9 @@ extension StretchRenderer {
                                     seed: UInt64 = PaulStretcher.defaultSeed,
                                     isCancelled: () -> Bool = { false },
                                     progress: ((Double) -> Void)? = nil) throws -> Bool {
-        guard let baker = StreamingEffectsBaker(sampleRate: source.sampleRate, effects: effects) else {
+        let totalFrames = outputFrameCount(source, parameters: parameters)
+        guard let baker = StreamingEffectsBaker(sampleRate: source.sampleRate, effects: effects,
+                                                totalInputFrames: totalFrames) else {
             throw AudioFileIOError.conversionFailed("could not configure the offline effects engine")
         }
         let writer = try StreamingAudioWriter(url: url, sampleRate: source.sampleRate, format: format)

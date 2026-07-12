@@ -27,6 +27,21 @@ public enum EffectsBaker {
     /// The tail appended for reverb/delay decays, in seconds.
     public static let tailSeconds = 4.0
 
+    /// Bakes only the library's own pure-DSP stages (wow, sweep filter,
+    /// pump, auto-pan, shimmer, convolution reverb) — no stock chain.
+    ///
+    /// Hosts use this to prepare a *playback* buffer: the pure stages can't
+    /// sit on a live `AVAudioEngine` graph, so they're printed into the
+    /// buffer while the stock ``EffectChain`` stays live on top. Export
+    /// bakes via ``bake(_:effects:)`` apply the identical stages, so what
+    /// you hear is what you export.
+    public static func bakePureStages(_ input: StereoBuffer, effects fx: EffectsParameters) -> StereoBuffer {
+        guard fx.isPureDSPEnabled, input.frameCount > 0 else { return input }
+        let stages = makePureStages(sampleRate: input.sampleRate, effects: fx,
+                                    totalFrames: input.frameCount)
+        return runPureStages(stages, input: input)
+    }
+
     /// Returns `input` with `effects` baked in.
     ///
     /// With no effects enabled the input is returned untouched. The shimmer
@@ -44,14 +59,14 @@ public enum EffectsBaker {
         guard fx.isAnyEnabled, input.frameCount > 0 else { return input }
         let sr = input.sampleRate
 
-        // Shimmer first: its haloed output feeds the stock chain, so a
-        // cathedral on top smooths the octave bloom.
+        // The library's own pure-DSP stages run first (wow → sweep filter →
+        // pump → auto-pan → shimmer → convolution reverb); the stock
+        // AVAudioUnit chain then processes their combined output.
         var working = input
-        if fx.shimmerEnabled {
-            let shimmer = ShimmerReverb(sampleRate: sr, parameters: fx)
-            let wet = shimmer.process(l: input.l, r: input.r)
-            let ring = shimmer.tail()
-            working = StereoBuffer(l: wet.l + ring.l, r: wet.r + ring.r, sampleRate: sr)
+        if fx.isPureDSPEnabled {
+            let stages = makePureStages(sampleRate: sr, effects: fx,
+                                        totalFrames: input.frameCount)
+            working = runPureStages(stages, input: input)
         }
         let stockActive = fx.isStockChainEnabled
         guard stockActive else { return working }

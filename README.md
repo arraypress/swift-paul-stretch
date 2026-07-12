@@ -55,6 +55,18 @@ memory, so an hour-long export never has to exist in RAM.
 - 🌠 **Shimmer reverb** — the library's own DSP (Freeverb tank + pitch-shifted
   feedback), because `AVAudioEngine` graphs can't hold the feedback cycle
   shimmer needs. The wash climbs in octaves; bakes offline and streams.
+- 🏛 **Convolution reverb** — algorithmically-generated impulse responses
+  (plate / hall / cathedral / exponential wash) with a real **decay-time**
+  control up to 30 s, convolved in streaming FFT partitions. Seeded and
+  deterministic.
+- 🌊 **Ambient motion suite** — a breathing **sweep filter** (TPT
+  state-variable core, LFO in octaves, bass-cut companion), tape
+  **wow & flutter** (cubic-interpolated, with seeded drift), a tidal
+  **breathing pump**, and a slow **auto-pan** — movement, colour and space
+  for drones.
+- 📈 **Automation lanes** — Catmull-Rom spline curves
+  (`AutomationLane`) drive effect parameters across the whole render:
+  a filter opening over twenty minutes is composition, not just processing.
 - 📦 **Codable parameters** — persist presets as JSON straight from
   `StretchParameters` / `EffectsParameters`.
 
