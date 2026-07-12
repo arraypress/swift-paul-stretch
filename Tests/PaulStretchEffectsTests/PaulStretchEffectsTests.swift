@@ -392,6 +392,90 @@ final class PaulStretchEffectsTests: XCTestCase {
         XCTAssertEqual(hz, 220, accuracy: 12, "varispeed 0.5 must halve the pitch of 440 Hz")
     }
 
+    func testStreamingRackMatchesWholeRackBake() {
+        let dry = tone()
+        let rack: [AppleEffect] = [
+            .eq(EQSettings(bands: [EQBandSettings(type: .highShelf, frequency: 6000, gain: 3)])),
+            .reverb(ReverbSettings(preset: .plate, wetDryMix: 40)),
+        ]
+        let whole = EffectRack.bake(dry, effects: rack)
+
+        guard let baker = StreamingRackBaker(sampleRate: dry.sampleRate, effects: rack) else {
+            return XCTFail("streaming rack setup failed")
+        }
+        var outL: [Float] = []
+        var pos = 0
+        while pos < dry.frameCount {
+            let end = min(dry.frameCount, pos + 9_000)
+            let wet = baker.process(l: Array(dry.l[pos..<end]), r: Array(dry.r[pos..<end]))
+            outL.append(contentsOf: wet.l)
+            pos = end
+        }
+        outL.append(contentsOf: baker.finish().l)
+
+        XCTAssertEqual(outL.count, whole.frameCount, "streamed rack length must match the whole bake")
+        let w = 2205
+        var i = 0
+        while i + w <= whole.frameCount {
+            let a = rms(whole.l[i..<i + w])
+            let b = rms(outL[i..<i + w])
+            XCTAssertEqual(a, b, accuracy: max(0.02, a * 0.1),
+                           "rack energy diverged in window at frame \(i)")
+            i += w
+        }
+    }
+
+    func testStreamingRackHandlesTimeUnits() {
+        let dry = tone(seconds: 2.0)
+        let rack: [AppleEffect] = [.varispeed(VarispeedSettings(rate: 0.5))]
+        guard let baker = StreamingRackBaker(sampleRate: dry.sampleRate, effects: rack) else {
+            return XCTFail("time-unit rack setup failed")
+        }
+        XCTAssertEqual(baker.rateProduct, 0.5)
+
+        var outL: [Float] = []
+        var pos = 0
+        while pos < dry.frameCount {
+            let end = min(dry.frameCount, pos + 20_000)
+            let wet = baker.process(l: Array(dry.l[pos..<end]), r: Array(dry.r[pos..<end]))
+            outL.append(contentsOf: wet.l)
+            pos = end
+        }
+        outL.append(contentsOf: baker.finish().l)
+
+        // Rate 0.5 → double the frames; the octave drop proves the audio
+        // genuinely went through the varispeed.
+        XCTAssertEqual(Double(outL.count), Double(dry.frameCount) * 2, accuracy: 8192)
+        var crossings = 0
+        for i in 1..<outL.count where (outL[i - 1] < 0) != (outL[i] < 0) { crossings += 1 }
+        let hz = Double(crossings) / (2 * Double(outL.count) / 44_100)
+        XCTAssertEqual(hz, 220, accuracy: 12, "streamed varispeed must halve the pitch")
+        XCTAssertFalse(outL.contains { $0.isNaN })
+    }
+
+    func testRenderToFileWithRack() throws {
+        let source = tone(seconds: 1.0)
+        var p = StretchParameters()
+        p.targetSeconds = 3
+        p.windowSeconds = 0.12
+        p.layering = .off
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("psrack-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let rack: [AppleEffect] = [.varispeed(VarispeedSettings(rate: 0.5)),
+                                   .reverb(ReverbSettings(wetDryMix: 30))]
+        let completed = try StretchRenderer.renderToFile(source, parameters: p, rack: rack,
+                                                         url: url, chunkFrames: 30_000)
+        XCTAssertTrue(completed)
+        let back = try AudioFileIO.readStereo(url: url)
+        let renderFrames = StretchRenderer.outputFrameCount(source, parameters: p)
+        let expected = renderFrames * 2 + Int(44_100 * EffectsBaker.tailSeconds)
+        XCTAssertEqual(Double(back.frameCount), Double(expected), accuracy: 16_384,
+                       "file must hold the varispeed-doubled render plus the reverb tail")
+    }
+
     func testRackRoundTripsThroughJSON() throws {
         let rack: [AppleEffect] = [
             .timePitch(TimePitchSettings(rate: 0.5, pitchCents: 700)),
