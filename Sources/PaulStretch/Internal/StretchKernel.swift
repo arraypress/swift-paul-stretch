@@ -19,17 +19,36 @@ import Accelerate
 /// `amount = 1` → fully random phase (the classic wash); `0` → untouched;
 /// between → rotate each bin by a random delta in `±π·amount`. Magnitudes
 /// are preserved and bins conjugate-mirrored so the IFFT stays real.
+/// Wraps a phase difference to `(-pi, pi]` so blending takes the short way
+/// round rather than sweeping the long arc.
+@inline(__always)
+private func wrapPi(_ x: Double) -> Double {
+    var a = x.truncatingRemainder(dividingBy: 2 * .pi)
+    if a > .pi { a -= 2 * .pi }
+    if a <= -.pi { a += 2 * .pi }
+    return a
+}
+
 private func randomizePhases(_ real: UnsafeMutablePointer<Float>,
                              _ imag: UnsafeMutablePointer<Float>,
                              _ n: Int,
                              _ amount: Double,
-                             _ rng: inout FastRNG) {
+                             _ rng: inout FastRNG,
+                             _ prevRng: inout FastRNG?,
+                             _ continuity: Double = 0) {
     let half = n >> 1
     if amount >= 1 {
         for k in 1..<half {
             let re = Double(real[k]); let im = Double(imag[k])
             let mag = (re * re + im * im).squareRoot()
-            let angle = rng.unit() * 2 * .pi
+            var angle = rng.unit() * 2 * .pi
+            // Carry a fraction of the previous window's phase for this bin.
+            // `prevRng` replays window b-1's stream in lockstep, so no state
+            // is stored and any range can still be rendered independently.
+            if continuity > 0, prevRng != nil {
+                let prev = prevRng!.unit() * 2 * .pi
+                angle = prev + (1 - continuity) * wrapPi(angle - prev)
+            }
             let rv = Float(mag * cos(angle)); let iv = Float(mag * sin(angle))
             real[k] = rv; imag[k] = iv
             real[n - k] = rv; imag[n - k] = -iv
@@ -40,6 +59,9 @@ private func randomizePhases(_ real: UnsafeMutablePointer<Float>,
             let re = Double(real[k]); let im = Double(imag[k])
             let mag = (re * re + im * im).squareRoot()
             let oldAngle = atan2(im, re)
+            // Keep the streams aligned even though partial randomisation is
+            // already anchored to the source phase and needs no continuity.
+            if prevRng != nil { _ = prevRng!.unit() }
             let delta = (rng.unit() * 2 - 1) * maxDelta
             let na = oldAngle + delta
             let rv = Float(mag * cos(na)); let iv = Float(mag * sin(na))
@@ -49,6 +71,31 @@ private func randomizePhases(_ real: UnsafeMutablePointer<Float>,
     }
     imag[0] = 0
     imag[half] = 0
+}
+
+// MARK: - Read position
+
+extension StretchKernel {
+
+    /// The analysis start frame for window `b`.
+    ///
+    /// Linear when ``spectralDrift`` is `0` (bit-identical to the classic
+    /// algorithm). Otherwise the linear position is offset by three
+    /// sinusoids whose rates are in golden-ratio proportion — chosen so the
+    /// components are mutually irrational and the combined motion has no
+    /// audible period over an hour-long render.
+    func readPosition(_ b: Int) -> Int {
+        let linear = Double(b) * inputStride
+        guard spectralDrift > 0, lastBlock > 0, inputLen > 0 else { return Int(linear) }
+        let phi = 1.618033988749895
+        let tau = Double(b) / Double(lastBlock)          // 0…1 through the render
+        let w = (sin(2 * .pi * phi * tau)
+               + sin(2 * .pi * phi * phi * tau)
+               + sin(2 * .pi * phi * phi * phi * tau)) / 3
+        // +-30 % of the source at full drift, matching the reference range.
+        let offset = w * spectralDrift * 0.30 * Double(inputLen)
+        return Int((linear + offset).rounded(.down))
+    }
 }
 
 // MARK: - FFT-domain pitch shift
@@ -114,6 +161,28 @@ struct StretchKernel {
     let pitchFactor: Double
     let doPitch: Bool
     let seed: UInt64
+    /// How far the analysis read head wanders from its linear position,
+    /// as a fraction of the input (`0` = classic linear reads).
+    ///
+    /// A linear read makes a very long render statistically static: the same
+    /// stretch ratio walks the source at a constant rate, so after a minute
+    /// there is nothing new happening. Drifting the read position keeps
+    /// re-approaching the material from different places, which is what
+    /// keeps hour-long output alive. The drift is a sum of three sinusoids
+    /// at golden-ratio-related rates, so the components never share a period
+    /// and the motion doesn't audibly repeat.
+    ///
+    /// Position is a pure function of the window index, so range-independent
+    /// rendering (multicore, chunked) still holds.
+    let spectralDrift: Double
+    /// How much of the previous window's phase is carried into this one,
+    /// `0…1` (`0` = fully independent random phase, the classic behaviour).
+    ///
+    /// Pure per-window randomness is what gives PaulStretch its grain. A
+    /// little continuity keeps the drone character but takes the digital
+    /// edge off. The previous window's phases are *recomputed* from its own
+    /// seed rather than remembered, so this stays range-independent too.
+    let phaseContinuity: Double
     /// Read the input circularly instead of zero-padding past its ends.
     ///
     /// Used by seamless-loop renders: without it, the analysis window
@@ -136,6 +205,8 @@ struct StretchKernel {
          pitchSemitones: Double,
          onsetSensitivity: Double,
          seed: UInt64,
+         spectralDrift: Double = 0,
+         phaseContinuity: Double = 0,
          wrapInput: Bool = false) {
         let sr = input.sampleRate
         self.inL = input.l
@@ -146,6 +217,8 @@ struct StretchKernel {
         self.onsetSensitivity = min(max(onsetSensitivity, 0), 1)
         self.pitchFactor = pow(2.0, pitchSemitones / 12.0)
         self.doPitch = abs(pitchFactor - 1) > 0.001
+        self.spectralDrift = min(max(spectralDrift, 0), 1)
+        self.phaseContinuity = min(max(phaseContinuity, 0), 1)
         self.seed = seed
 
         let windowSize = nextPow2(Int(windowSeconds * sr))
@@ -216,7 +289,7 @@ struct StretchKernel {
             for b in bStart...bEnd {
                 if (b & 63) == 0 && isCancelled() { return }
                 let outputPos = b * outputStride
-                let inputStart = Int(Double(b) * inputStride)
+                let inputStart = readPosition(b)
 
                 if wrapInput {
                     for i in 0..<windowSize {
@@ -249,8 +322,11 @@ struct StretchKernel {
                 // Per-window seed → any caller computing window b gets
                 // identical phases, wherever the range boundaries fall.
                 var rng = FastRNG(seed: blockSeed(seed, b))
-                randomizePhases(realL, imagL, windowSize, effRandomness, &rng)
-                randomizePhases(realR, imagR, windowSize, effRandomness, &rng)
+                // Window 0 has no predecessor, so it stays fully random.
+                var prevRng: FastRNG? = (phaseContinuity > 0 && b > 0)
+                    ? FastRNG(seed: blockSeed(seed, b - 1)) : nil
+                randomizePhases(realL, imagL, windowSize, effRandomness, &rng, &prevRng, phaseContinuity)
+                randomizePhases(realR, imagR, windowSize, effRandomness, &rng, &prevRng, phaseContinuity)
 
                 if doPitch {
                     pitchShiftBins(realL, imagL, windowSize, pitchFactor, tmpR, tmpI)

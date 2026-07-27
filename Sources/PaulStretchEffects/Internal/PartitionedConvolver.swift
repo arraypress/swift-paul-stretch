@@ -68,9 +68,6 @@ final class PartitionedConvolver {
     private var accRe: [Float]
     private var accIm: [Float]
 
-    /// The number of partitions (exposed for cost reasoning in tests).
-    var partitionCount: Int { irRe.count }
-
     init?(impulse: [Float], blockSize: Int = 4096) {
         guard !impulse.isEmpty, blockSize > 0, (blockSize & (blockSize - 1)) == 0 else { return nil }
         self.blockSize = blockSize

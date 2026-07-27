@@ -54,6 +54,9 @@ public final class StretchPlayer: ObservableObject {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let chain = EffectChain()
+    /// The live pure-DSP node, once ``enableLiveEffects(_:)`` installs it.
+    private var liveNode: AVAudioUnit?
+    private var liveChain: LiveEffectChain?
     private let analyzer: SpectrumAnalyzer
 
     private var buf: StereoBuffer?
@@ -78,7 +81,7 @@ public final class StretchPlayer: ObservableObject {
         spectrum = Array(repeating: 0, count: analyzer.bandCount)
 
         engine.attach(player)
-        chain.install(in: engine, from: player, to: engine.mainMixerNode, format: fmt)
+        wireGraph()
 
         // Live spectrum: tap the mixer output (post-effects). The closure
         // runs on the audio thread; results hop to main for the UI.
@@ -93,9 +96,63 @@ public final class StretchPlayer: ObservableObject {
 
     /// Applies stock-chain effect settings to the live graph.
     ///
-    /// - Parameter fx: The effect settings (only the stock chain runs live;
-    ///   bake the pure-DSP stages into the buffer before loading).
-    public func setEffects(_ fx: EffectsParameters) { chain.apply(fx) }
+    /// - Parameter fx: The effect settings. The stock chain always runs
+    ///   live; the pure-DSP stages run live too once
+    ///   ``enableLiveEffects(_:)`` has succeeded, and otherwise must be baked
+    ///   into the buffer before loading.
+    public func setEffects(_ fx: EffectsParameters) {
+        chain.apply(fx)
+        liveChain?.setEffects(fx)
+    }
+
+    /// Wires `player → [live effects] → stock chain → mixer`.
+    ///
+    /// Called at init and whenever the graph shape changes (a new sample
+    /// rate, or the live node arriving); `connect` replaces existing
+    /// connections, so it is safe to repeat.
+    private func wireGraph() {
+        var source: AVAudioNode = player
+        if let liveNode {
+            engine.connect(player, to: liveNode, format: fmt)
+            source = liveNode
+        }
+        chain.install(in: engine, from: source, to: engine.mainMixerNode, format: fmt)
+    }
+
+    /// Moves the library's own DSP (shimmer, convolution reverb, sweep
+    /// filter, wow, pump, auto-pan) onto the live graph, so changing those
+    /// settings no longer requires re-baking the playback buffer.
+    ///
+    /// Installing the node restarts the engine, so call this once before
+    /// playback rather than mid-transport.
+    ///
+    /// - Parameter fx: The settings the live chain starts with.
+    /// - Returns: `true` if the node was installed. On `false` the caller
+    ///   must keep baking — nothing is changed and the graph still plays.
+    @discardableResult
+    public func enableLiveEffects(_ fx: EffectsParameters) async -> Bool {
+        guard liveNode == nil else {
+            liveChain?.setEffects(fx)
+            return true
+        }
+        let live = LiveEffectChain(sampleRate: connectedRate, effects: fx)
+        guard let node = await LiveEffectNode.make(chain: live) else { return false }
+        let wasPlaying = isPlaying
+        let resumeAt = currentTime
+        engine.stop()
+        started = false
+        engine.attach(node)
+        liveNode = node
+        liveChain = live
+        wireGraph()
+        chain.apply(fx)
+        if wasPlaying { restart(from: resumeAt) }
+        return true
+    }
+
+    /// `true` once the pure-DSP stages are running on the live graph, so the
+    /// host can skip baking them.
+    public var isLiveEffectsEnabled: Bool { liveNode != nil }
 
     /// Loads a buffer, stopping any current playback.
     ///
@@ -111,8 +168,8 @@ public final class StretchPlayer: ObservableObject {
         if b.sampleRate != connectedRate {
             engine.stop()
             started = false
-            chain.install(in: engine, from: player, to: engine.mainMixerNode, format: fmt)
             connectedRate = b.sampleRate
+            wireGraph()
         }
         buf = b
         fullPCM = AudioFileIO.makePCMBuffer(b, format: fmt)
@@ -121,6 +178,53 @@ public final class StretchPlayer: ObservableObject {
         applyRegion(region)
         currentTime = regionStart
         basePosition = regionStart
+    }
+
+    /// Swaps the playing buffer **without interrupting playback**, keeping
+    /// the playhead where it was and resuming if it was running.
+    ///
+    /// Use this for hot-swaps — re-baking a pure-DSP effect, say — where
+    /// ``load(_:loop:region:)`` would be wrong: `load` stops the transport,
+    /// and ``seek(to:)`` only restarts when already playing, so the pair
+    /// silently leaves playback stopped. That is a jarring result when the
+    /// user only nudged an effect slider, and worse when the re-bake is
+    /// asynchronous, because playback then dies seconds after the change.
+    ///
+    /// - Parameters:
+    ///   - b: The replacement audio.
+    ///   - loop: Whether playback loops.
+    ///   - region: An optional playable sub-range, in seconds.
+    public func reload(_ b: StereoBuffer, loop: Bool, region: ClosedRange<Double>? = nil) {
+        let wasPlaying = isPlaying
+        let resumeAt = currentTime
+        // The replacement is a different signal at the same instant, so the
+        // splice is a step discontinuity — a click. Duck across it: audible
+        // as a brief dip rather than a tick, which is the best that can be
+        // done without running both buffers at once.
+        if wasPlaying { rampOutputVolume(to: 0, over: 0.02) }
+        load(b, loop: loop, region: region)
+        let t = min(max(resumeAt, regionStart), max(regionStart, regionEnd - 0.01))
+        currentTime = t
+        basePosition = t
+        if wasPlaying {
+            restart(from: t)
+            rampOutputVolume(to: 1, over: 0.06)
+        }
+    }
+
+    /// Steps `mainMixerNode.outputVolume` toward `target`. `AVAudioMixerNode`
+    /// has no parameter automation, so this is a short timer ramp — coarse,
+    /// but only ever used to hide a splice.
+    private func rampOutputVolume(to target: Float, over seconds: Double) {
+        let steps = 8
+        let start = engine.mainMixerNode.outputVolume
+        let dt = seconds / Double(steps)
+        for i in 1...steps {
+            let v = start + (target - start) * Float(i) / Float(steps)
+            DispatchQueue.main.asyncAfter(deadline: .now() + dt * Double(i)) { [weak self] in
+                self?.engine.mainMixerNode.outputVolume = v
+            }
+        }
     }
 
     /// Restricts playback (and looping) to a sub-range; the playhead stays

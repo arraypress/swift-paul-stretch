@@ -60,8 +60,9 @@ memory, so an hour-long export never has to exist in RAM.
   wraps Apple's reverb/EQ/filter/delay as a live chain plus offline and
   streaming bakes, so what you monitor is what you export.
 - 🌠 **Shimmer reverb** — the library's own DSP (Freeverb tank + pitch-shifted
-  feedback), because `AVAudioEngine` graphs can't hold the feedback cycle
-  shimmer needs. The wash climbs in octaves; bakes offline and streams.
+  feedback). An `AVAudioEngine` *graph* can't hold the feedback cycle shimmer
+  needs, but a cycle kept inside one render callback can — so it runs live via
+  `LiveEffectNode`, and bakes offline and streams for export.
 - 🏛 **Convolution reverb** — algorithmically-generated impulse responses
   (plate / hall / cathedral / exponential wash) with a real **decay-time**
   control up to 30 s, convolved in streaming FFT partitions. Seeded and
@@ -71,6 +72,21 @@ memory, so an hour-long export never has to exist in RAM.
   **wow & flutter** (cubic-interpolated, with seeded drift), a tidal
   **breathing pump**, and a slow **auto-pan** — movement, colour and space
   for drones.
+- ⚡️ **Realtime pure DSP** — `LiveEffectChain` + `LiveEffectNode` run
+  shimmer, convolution reverb, sweep filter, wow, pump, auto-pan, gate and
+  placement *on the playback graph* as an in-process v3 audio unit, so every
+  effect is tweakable while audio plays instead of forcing a re-render.
+  Measured at ~1.6 ms per 512-frame quantum — about 13% of the budget.
+- 🎚 **Parametric EQ** — seven bands (high-pass, two shelves, three bells,
+  low-pass), each with shape, frequency, gain and bandwidth. Runs live on
+  `AVAudioUnitEQ`; every band starts flat, so enabling it is silent.
+- ⏹ **Trance gate** — 16-step rhythmic gating with named patterns
+  (eighths / sixteenths / off-beat / tresillo / sparse), rate, depth,
+  edge smoothing and a ping-pong stereo offset. The one effect that gives a
+  static drone a pulse.
+- ↔️ **Stereo placement** — equal-power pan (unity at centre, no 3 dB dip)
+  plus mid/side width: collapse to mono at `0`, spread past the original
+  image at `2`. Mono-safe, unlike a delay-based widener.
 - 📈 **Automation lanes** — Catmull-Rom spline curves
   (`AutomationLane`) drive effect parameters across the whole render:
   a filter opening over twenty minutes is composition, not just processing.
@@ -276,8 +292,7 @@ chain.apply(fx)                 // update any time, even while playing
 // Baked into an export (same parameters → what you hear is what you export):
 let wet = EffectsBaker.bake(drone, effects: fx)
 
-// Shimmer reverb (baked path only — feedback cycles can't live on an
-// AVAudioEngine graph; hosts re-bake to audition):
+// Shimmer reverb — runs live via LiveEffectNode (below), and bakes for export:
 fx.shimmerEnabled = true
 fx.shimmerPitch = 12          // octave-up bloom (+7 for fifths)
 fx.shimmerFeedback = 55
@@ -286,6 +301,41 @@ let halo = EffectsBaker.bake(drone, effects: fx)
 // Or streamed, for long effected exports in bounded memory:
 try StretchRenderer.renderToWAVFile(source, parameters: params, effects: fx, url: exportURL)
 ```
+
+### Realtime effects — tweak while it plays
+
+The stock Apple chain was always live; the library's own DSP used to be baked
+into the playback buffer, so changing shimmer or the sweep filter meant a
+re-render. `LiveEffectNode` puts those stages on the graph too.
+
+```swift
+// One call, before playback. Everything is live from then on.
+await player.enableLiveEffects(fx)
+
+fx.shimmerMix = 60
+fx.tranceGateEnabled = true
+player.setEffects(fx)          // heard on the next 512-frame quantum
+```
+
+Or drive the chain yourself, outside `StretchPlayer`:
+
+```swift
+let chain = LiveEffectChain(sampleRate: 44100, effects: fx)
+let node  = await LiveEffectNode.make(chain: chain)!
+engine.attach(node)
+engine.connect(player, to: node, format: format)
+chain.setEffects(updated)      // non-blocking; the render picks it up
+```
+
+Two things worth knowing. **Parameter changes never block the audio thread** —
+`setEffects` builds the replacement chain on the calling thread and publishes
+it; the render callback takes it with a try-lock and keeps the current one if
+it loses the race, costing at most a quantum of staleness rather than a
+dropout. And **a rebuilt chain starts with empty delay lines**, so a live
+change truncates reverb tails — cross-fade over a swap rather than cutting to
+it.
+
+Export still bakes the identical stages offline, so tune-then-bounce holds.
 
 ### Channel-strip effect stacks (PaulStretchEffects)
 
@@ -447,11 +497,14 @@ exists for exactly this.
 swift test -c release
 ```
 
-147 tests cover FFT correctness against a scalar oracle, determinism, every
+168 tests cover FFT correctness against a scalar oracle, determinism, every
 `StereoBuffer` transform, all pipeline modes, file I/O round trips and the
 effects bakers. The load-bearing suite asserts that chunked output is
 **bit-identical** to in-memory output across the full mode matrix and
-arbitrary chunk sizes. (Use `-c release` — unoptimised FFT loops are
+arbitrary chunk sizes. The realtime suite proves the live chain matches the
+offline bake sample-for-sample, is independent of quantum size, survives
+parameter swaps mid-stream, and does not gate the audio when a block-based
+stage withholds frames. (Use `-c release` — unoptimised FFT loops are
 20–50× slower.)
 
 ## License

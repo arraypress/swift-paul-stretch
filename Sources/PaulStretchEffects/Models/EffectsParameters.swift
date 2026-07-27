@@ -44,13 +44,13 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     public var eqEnabled = false
 
     /// Low-shelf gain at 120 Hz, in decibels.
-    public var eqLowGain: Float = 0
+    /// The parametric EQ bands, low to high.
+    ///
+    /// A high-pass, two shelves, three bells and a low-pass. Every band
+    /// starts disabled and flat, so enabling the EQ is silent until a band
+    /// is dialled in.
+    public var eqBands: [EQBand] = EQBand.defaultBands
 
-    /// Parametric-band gain at 1 kHz, in decibels.
-    public var eqMidGain: Float = 0
-
-    /// High-shelf gain at 6 kHz, in decibels.
-    public var eqHighGain: Float = 0
 
     // MARK: Resonant low-pass filter
 
@@ -255,6 +255,40 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     // MARK: Auto-pan
 
     /// Whether the auto-pan is active (baked path — see ``AutoPan``).
+    // MARK: - Placement (pure DSP)
+
+    /// Whether static stereo placement is applied.
+    public var placementEnabled = false
+
+    /// Stereo position, `-1` hard left to `+1` hard right. Equal-power.
+    public var placementPan: Float = 0
+
+    /// Stereo width: `0` collapses to mono, `1` is unchanged, `2` doubles
+    /// the side signal. Mid/side based.
+    public var placementWidth: Float = 1
+
+    // MARK: - Trance gate (pure DSP)
+
+    /// Whether the rhythmic gate is applied.
+    public var tranceGateEnabled = false
+
+    /// Gate rate in steps per second.
+    public var tranceGateRateHz: Float = 4
+
+    /// How far closed steps duck, `0` (no gating) to `1` (full silence).
+    public var tranceGateDepth: Float = 1
+
+    /// Edge smoothing in milliseconds — the ramp between open and closed.
+    /// Below about 2 ms the switching itself clicks.
+    public var tranceGateSmoothingMs: Float = 8
+
+    /// Which steps are open, as a 16-slot on/off pattern.
+    public var tranceGatePattern: [Bool] = TranceGatePattern.eighths
+
+    /// Offsets the right channel by this many steps, for a ping-pong feel.
+    /// `0` gates both channels together.
+    public var tranceGateStereoOffset: Int = 0
+
     public var autoPanEnabled = false
 
     /// Sweep width `0…1`.
@@ -281,13 +315,38 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
             || distortionEnabled || compressorEnabled || limiterEnabled
     }
 
+    /// Enables the EQ's shelf and mid bands and sets their gains — the
+    /// broad-strokes tone move, without hand-indexing the band list.
+    ///
+    /// Passing `nil` leaves that band untouched; passing `0` flattens and
+    /// disables it.
+    ///
+    /// - Parameters:
+    ///   - low: Low-shelf gain in decibels.
+    ///   - mid: Mid bell gain in decibels.
+    ///   - high: High-shelf gain in decibels.
+    public mutating func setEQTone(low: Float? = nil, mid: Float? = nil, high: Float? = nil) {
+        func set(_ index: Int, _ gain: Float?) {
+            guard let gain, index < eqBands.count else { return }
+            eqBands[index].gain = gain
+            eqBands[index].enabled = gain != 0
+        }
+        set(1, low)     // low shelf, 120 Hz
+        set(3, mid)     // mid bell, 1.5 kHz
+        set(5, high)    // high shelf, 6 kHz
+    }
+
     /// `true` when any of the library's own pure-DSP stages is enabled
-    /// (shimmer, convolution reverb, sweep filter, wow, pump, auto-pan).
-    /// These run in the baked path only — they can't sit on a live
-    /// `AVAudioEngine` graph.
+    /// (shimmer, convolution reverb, sweep filter, trance gate, wow, pump,
+    /// auto-pan, placement).
+    ///
+    /// These run live via ``LiveEffectChain`` when the host installs a
+    /// ``LiveEffectNode``, and are baked into the buffer otherwise; export
+    /// always bakes them.
     public var isPureDSPEnabled: Bool {
         shimmerEnabled || convolutionReverbEnabled || sweepFilterEnabled
             || wowEnabled || pumpEnabled || autoPanEnabled
+            || tranceGateEnabled || placementEnabled
     }
 
     /// `true` when at least one effect is enabled — baking with everything
@@ -316,6 +375,9 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         s += "|\(wowEnabled),\(wowAmount),\(wowRateHz)"
         s += "|\(pumpEnabled),\(pumpDepth),\(pumpRateHz)"
         s += "|\(autoPanEnabled),\(autoPanDepth),\(autoPanRateHz)"
+        s += "|\(tranceGateEnabled),\(tranceGateRateHz),\(tranceGateDepth),\(tranceGateSmoothingMs),\(tranceGateStereoOffset)"
+        s += "," + tranceGatePattern.map { $0 ? "1" : "0" }.joined()
+        s += "|\(placementEnabled),\(placementPan),\(placementWidth)"
         if !parameterLanes.isEmpty {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
@@ -333,7 +395,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case reverbEnabled, reverbPreset, reverbMix
-        case eqEnabled, eqLowGain, eqMidGain, eqHighGain
+        case eqEnabled, eqBands
         case filterEnabled, filterCutoff, filterResonance
         case delayEnabled, delayTime, delayFeedback, delayMix, delayLowPassCutoff
         case distortionEnabled, distortionPreset, distortionPreGain, distortionMix
@@ -352,6 +414,9 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case wowEnabled, wowAmount, wowRateHz
         case pumpEnabled, pumpDepth, pumpRateHz
         case autoPanEnabled, autoPanDepth, autoPanRateHz
+        case placementEnabled, placementPan, placementWidth
+        case tranceGateEnabled, tranceGateRateHz, tranceGateDepth,
+             tranceGateSmoothingMs, tranceGatePattern, tranceGateStereoOffset
         case parameterLanes
     }
 
@@ -364,9 +429,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         reverbPreset = try c.decodeIfPresent(ReverbPreset.self, forKey: .reverbPreset) ?? reverbPreset
         reverbMix = try c.decodeIfPresent(Float.self, forKey: .reverbMix) ?? reverbMix
         eqEnabled = try c.decodeIfPresent(Bool.self, forKey: .eqEnabled) ?? eqEnabled
-        eqLowGain = try c.decodeIfPresent(Float.self, forKey: .eqLowGain) ?? eqLowGain
-        eqMidGain = try c.decodeIfPresent(Float.self, forKey: .eqMidGain) ?? eqMidGain
-        eqHighGain = try c.decodeIfPresent(Float.self, forKey: .eqHighGain) ?? eqHighGain
+        eqBands = try c.decodeIfPresent([EQBand].self, forKey: .eqBands) ?? eqBands
         filterEnabled = try c.decodeIfPresent(Bool.self, forKey: .filterEnabled) ?? filterEnabled
         filterCutoff = try c.decodeIfPresent(Float.self, forKey: .filterCutoff) ?? filterCutoff
         filterResonance = try c.decodeIfPresent(Float.self, forKey: .filterResonance) ?? filterResonance
@@ -420,6 +483,15 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         autoPanEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoPanEnabled) ?? autoPanEnabled
         autoPanDepth = try c.decodeIfPresent(Float.self, forKey: .autoPanDepth) ?? autoPanDepth
         autoPanRateHz = try c.decodeIfPresent(Float.self, forKey: .autoPanRateHz) ?? autoPanRateHz
+        placementEnabled = try c.decodeIfPresent(Bool.self, forKey: .placementEnabled) ?? placementEnabled
+        placementPan = try c.decodeIfPresent(Float.self, forKey: .placementPan) ?? placementPan
+        placementWidth = try c.decodeIfPresent(Float.self, forKey: .placementWidth) ?? placementWidth
+        tranceGateEnabled = try c.decodeIfPresent(Bool.self, forKey: .tranceGateEnabled) ?? tranceGateEnabled
+        tranceGateRateHz = try c.decodeIfPresent(Float.self, forKey: .tranceGateRateHz) ?? tranceGateRateHz
+        tranceGateDepth = try c.decodeIfPresent(Float.self, forKey: .tranceGateDepth) ?? tranceGateDepth
+        tranceGateSmoothingMs = try c.decodeIfPresent(Float.self, forKey: .tranceGateSmoothingMs) ?? tranceGateSmoothingMs
+        tranceGatePattern = try c.decodeIfPresent([Bool].self, forKey: .tranceGatePattern) ?? tranceGatePattern
+        tranceGateStereoOffset = try c.decodeIfPresent(Int.self, forKey: .tranceGateStereoOffset) ?? tranceGateStereoOffset
         parameterLanes = try c.decodeIfPresent([String: AutomationLane].self, forKey: .parameterLanes) ?? parameterLanes
     }
 }

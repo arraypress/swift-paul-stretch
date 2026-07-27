@@ -82,6 +82,25 @@ public struct StretchParameters: Sendable, Codable, Equatable {
     /// more intact at the cost of a less even drone.
     public var onsetSensitivity: Double = 0
 
+    /// How far the analysis read head wanders from its linear position,
+    /// `0…1` (a fraction of the source; `1` ≈ ±30 %).
+    ///
+    /// `0` reads linearly, exactly as the classic algorithm does. Above zero
+    /// the read position is offset by three sinusoids at golden-ratio rates,
+    /// so the render keeps re-approaching the material from different places
+    /// instead of walking it once at a constant rate. This is the single
+    /// biggest lever on whether an hour-long render still feels alive after
+    /// the first minute.
+    public var spectralDrift: Double = 0
+
+    /// How much of the previous window's phase carries into the next, `0…1`.
+    ///
+    /// `0` is fully independent random phase — the classic PaulStretch
+    /// grain. Around `0.3` keeps the drone character while taking the
+    /// digital edge off. Only applies at full ``phaseRandomness``, since
+    /// partial randomisation is already anchored to the source's own phase.
+    public var phaseContinuity: Double = 0
+
     // MARK: Source treatment
 
     /// Tape-machine varispeed applied to the source before stretching

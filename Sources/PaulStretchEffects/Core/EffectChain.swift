@@ -37,7 +37,7 @@ public final class EffectChain {
     public let filter = AVAudioUnitEQ(numberOfBands: 1)
 
     /// 3-band EQ (low shelf 120 Hz, parametric 1 kHz, high shelf 6 kHz).
-    public let eq = AVAudioUnitEQ(numberOfBands: 3)
+    public let eq = AVAudioUnitEQ(numberOfBands: EQBand.defaultBands.count)
 
     /// Stereo delay.
     public let delay = AVAudioUnitDelay()
@@ -107,11 +107,16 @@ public final class EffectChain {
         fb.bypass = !fx.filterEnabled
         filter.bypass = !fx.filterEnabled
 
-        // 3-band EQ
-        let lo = eq.bands[0], mid = eq.bands[1], hi = eq.bands[2]
-        lo.filterType = .lowShelf;  lo.frequency = 120;  lo.gain = fx.eqLowGain;  lo.bypass = !fx.eqEnabled
-        mid.filterType = .parametric; mid.frequency = 1000; mid.bandwidth = 1.0; mid.gain = fx.eqMidGain; mid.bypass = !fx.eqEnabled
-        hi.filterType = .highShelf; hi.frequency = 6000; hi.gain = fx.eqHighGain; hi.bypass = !fx.eqEnabled
+        // Parametric EQ — one AVAudioUnitEQ band per EQBand.
+        for (i, node) in eq.bands.enumerated() {
+            guard i < fx.eqBands.count else { node.bypass = true; continue }
+            let b = fx.eqBands[i]
+            node.filterType = b.type.avFilterType
+            node.frequency = max(20, min(b.frequency, 20000))
+            node.gain = b.type.usesGain ? max(-24, min(b.gain, 24)) : 0
+            node.bandwidth = max(0.05, min(b.bandwidth, 5))
+            node.bypass = !(fx.eqEnabled && b.enabled)
+        }
         eq.bypass = !fx.eqEnabled
 
         // Delay

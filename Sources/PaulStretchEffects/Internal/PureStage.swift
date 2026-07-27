@@ -33,8 +33,13 @@ protocol PureStage: AnyObject {
 extension ShimmerReverb: PureStage {}
 
 /// Builds the enabled pure-DSP stages in their fixed chain order:
-/// wow → sweep filter → pump → auto-pan → shimmer → convolution reverb.
-/// (Movement first, colour next, space last.)
+/// wow → sweep filter → trance gate → pump → auto-pan → shimmer →
+/// convolution reverb → placement.
+/// (Movement first, colour next, space after, stereo placement last.)
+///
+/// The gate sits *before* the reverbs on purpose: gating after them chops
+/// the tail and undoes the space, where gating into them lets each pulse
+/// ring out.
 ///
 /// `totalFrames` is the full dry length the stages will see — the time base
 /// for ``AutomationLane`` evaluation. Pass `nil` when no lanes are bound.
@@ -64,6 +69,14 @@ func makePureStages(sampleRate: Double,
                                   cutoffLane: lanes["sweepFilter.cutoff"],
                                   resonanceLane: lanes["sweepFilter.resonance"],
                                   totalFrames: total))
+    }
+    if fx.tranceGateEnabled {
+        stages.append(TranceGate(sampleRate: sampleRate,
+                                 rateHz: fx.tranceGateRateHz,
+                                 depth: fx.tranceGateDepth,
+                                 smoothingMs: fx.tranceGateSmoothingMs,
+                                 pattern: fx.tranceGatePattern,
+                                 stereoOffset: fx.tranceGateStereoOffset))
     }
     if fx.pumpEnabled {
         stages.append(BreathingPump(sampleRate: sampleRate,
@@ -102,6 +115,9 @@ func makePureStages(sampleRate: Double,
                                             mixLane: lanes["convolutionReverb.mix"],
                                             totalFrames: total))
         }
+    }
+    if fx.placementEnabled {
+        stages.append(StereoPlacement(pan: fx.placementPan, width: fx.placementWidth))
     }
     return stages
 }

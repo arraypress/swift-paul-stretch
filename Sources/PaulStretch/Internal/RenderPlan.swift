@@ -146,6 +146,8 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                                 pitchSemitones: p.pitchSemitones + recipe.pitchSemitones,
                                 onsetSensitivity: p.onsetSensitivity,
                                 seed: layerSeed,
+                                spectralDrift: p.spectralDrift,
+                                phaseContinuity: p.phaseContinuity,
                                 wrapInput: p.seamlessLoop)
             let stretchedFrames = kernel?.outputLength ?? src.frameCount
             let stretchedDur = Double(stretchedFrames) / sr

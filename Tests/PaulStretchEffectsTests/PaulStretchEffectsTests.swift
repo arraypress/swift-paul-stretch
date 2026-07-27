@@ -61,7 +61,7 @@ final class PaulStretchEffectsTests: XCTestCase {
         let dry = tone(hz: 100)   // sits on the low shelf
         var fx = EffectsParameters()
         fx.eqEnabled = true
-        fx.eqLowGain = 6
+        fx.setEQTone(low: 6)
         let wet = EffectsBaker.bake(dry, effects: fx)
         XCTAssertEqual(wet.frameCount, dry.frameCount, "EQ has no tail")
         // A +6 dB low shelf should raise the level of a 100 Hz tone.
@@ -77,7 +77,7 @@ final class PaulStretchEffectsTests: XCTestCase {
         fx.reverbEnabled = true
         fx.reverbMix = 40
         fx.eqEnabled = true
-        fx.eqHighGain = 3
+        fx.setEQTone(high: 3)
 
         let whole = EffectsBaker.bake(dry, effects: fx)
 
@@ -256,16 +256,18 @@ final class PaulStretchEffectsTests: XCTestCase {
                        "shimmer ring-out and reverb tail must both be appended")
     }
 
-    func testLegacyEffectsJSONStillDecodes() throws {
-        // v1.1-era settings know nothing of the shimmer fields.
-        let legacyJSON = """
+    /// Decoding is tolerant: a settings file that predates a field — or
+    /// carries one that no longer exists — still loads, with defaults for
+    /// anything absent. Presets must survive library upgrades.
+    func testPartialEffectsJSONDecodesWithDefaults() throws {
+        let partialJSON = """
         {"reverbEnabled":true,"reverbPreset":"plate","reverbMix":40,
-         "eqEnabled":false,"eqLowGain":0,"eqMidGain":0,"eqHighGain":0,
+         "eqEnabled":false,"retiredField":123,
          "filterEnabled":false,"filterCutoff":8000,"filterResonance":0,
          "delayEnabled":false,"delayTime":0.35,"delayFeedback":35,"delayMix":25}
         """
         let decoded = try JSONDecoder().decode(EffectsParameters.self,
-                                               from: Data(legacyJSON.utf8))
+                                               from: Data(partialJSON.utf8))
         XCTAssertTrue(decoded.reverbEnabled)
         XCTAssertEqual(decoded.reverbPreset, .plate)
         XCTAssertFalse(decoded.shimmerEnabled, "missing shimmer fields keep defaults")

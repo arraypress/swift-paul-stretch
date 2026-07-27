@@ -86,7 +86,7 @@ final class StretchPlayerTests: XCTestCase {
         let base = EffectsParameters().pureDSPSignature
         var fx = EffectsParameters()
         fx.reverbEnabled = true; fx.reverbMix = 80
-        fx.eqEnabled = true; fx.eqLowGain = 6
+        fx.eqEnabled = true; fx.setEQTone(low: 6)
         fx.filterEnabled = true; fx.filterCutoff = 900
         fx.delayEnabled = true; fx.delayTime = 0.7
         fx.distortionEnabled = true; fx.distortionPreGain = -3

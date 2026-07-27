@@ -69,6 +69,8 @@ public enum PaulStretcher {
                                phaseRandomness: Double = 1.0,
                                pitchSemitones: Double = 0,
                                onsetSensitivity: Double = 0,
+                               spectralDrift: Double = 0,
+                               phaseContinuity: Double = 0,
                                seed: UInt64 = defaultSeed,
                                isCancelled: () -> Bool = { false },
                                progress: ((Double) -> Void)? = nil) -> StereoBuffer {
@@ -82,7 +84,9 @@ public enum PaulStretcher {
                                    phaseRandomness: phaseRandomness,
                                    pitchSemitones: pitchSemitones,
                                    onsetSensitivity: onsetSensitivity,
-                                   seed: seed)
+                                   seed: seed,
+                                   spectralDrift: spectralDrift,
+                                   phaseContinuity: phaseContinuity)
         return renderFull(kernel, sampleRate: input.sampleRate,
                           isCancelled: isCancelled, progress: progress)
     }
