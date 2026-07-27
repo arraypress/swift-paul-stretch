@@ -98,6 +98,71 @@ extension StretchKernel {
     }
 }
 
+// MARK: - Resampling
+
+extension StretchKernel {
+
+    /// Resamples a buffer, changing its length by `by` and its pitch by `1/by`.
+    ///
+    /// Catmull-Rom rather than linear: linear interpolation of a waveform is a
+    /// lowpass whose corner moves with the fractional offset, which is its own
+    /// source of shimmer — precisely the class of artefact this is here to
+    /// remove.
+    ///
+    /// Decimation (`by < 1`, i.e. shifting UP) is pre-filtered with a short
+    /// moving average, because taking every 1/by-th sample of full-band audio
+    /// folds everything above the new Nyquist back down as aliasing.
+    ///
+    /// - Parameters:
+    ///   - input: The audio to resample.
+    ///   - by: Length multiplier. `0.5` halves the length and raises pitch an
+    ///     octave; `2` doubles it and drops an octave.
+    /// - Returns: The resampled audio, at the same sample rate.
+    static func resampled(_ input: StereoBuffer, by by: Double) -> StereoBuffer {
+        let n = input.frameCount
+        guard n > 3, by > 0, abs(by - 1) > 0.0001 else { return input }
+        let outCount = max(4, Int((Double(n) * by).rounded()))
+
+        /// A moving average wide enough to cover the new sample spacing.
+        func prefiltered(_ x: [Float]) -> [Float] {
+            guard by < 1 else { return x }
+            let width = max(2, Int((1 / by).rounded()))
+            guard width > 1 else { return x }
+            var out = [Float](repeating: 0, count: x.count)
+            var running: Float = 0
+            for i in 0..<x.count {
+                running += x[i]
+                if i >= width { running -= x[i - width] }
+                out[i] = running / Float(min(i + 1, width))
+            }
+            return out
+        }
+
+        func resample(_ x: [Float]) -> [Float] {
+            let src = prefiltered(x)
+            var out = [Float](repeating: 0, count: outCount)
+            let step = Double(n - 1) / Double(outCount - 1)
+            for i in 0..<outCount {
+                let pos = Double(i) * step
+                let k = Int(pos)
+                let t = Float(pos - Double(k))
+                let p0 = src[max(k - 1, 0)]
+                let p1 = src[min(k, n - 1)]
+                let p2 = src[min(k + 1, n - 1)]
+                let p3 = src[min(k + 2, n - 1)]
+                out[i] = 0.5 * ((2 * p1)
+                              + (-p0 + p2) * t
+                              + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t
+                              + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t)
+            }
+            return out
+        }
+
+        return StereoBuffer(l: resample(input.l), r: resample(input.r),
+                            sampleRate: input.sampleRate)
+    }
+}
+
 // MARK: - FFT-domain pitch shift
 
 /// Output bin `K` reads from source bin `K/factor` (linear interpolation).
@@ -209,14 +274,36 @@ struct StretchKernel {
          phaseContinuity: Double = 0,
          wrapInput: Bool = false) {
         let sr = input.sampleRate
-        self.inL = input.l
-        self.inR = input.r
-        self.inputLen = input.frameCount
-        self.wrapInput = wrapInput && input.frameCount > 0
+        // Pitch by RESAMPLING THE INPUT, not by remapping FFT bins.
+        //
+        // Bin remapping interpolated complex values linearly, which is not
+        // phase-coherent: adjacent bins of a windowed sinusoid have a fixed
+        // phase relationship and interpolation destroys it by an amount that
+        // depends on where the fractional bin position falls. Shifting UP reads
+        // source positions less than a bin apart, so consecutive output bins
+        // interpolated repeatedly within the same pair and the error varied
+        // window to window — audible as flutter, and measurably worse upward
+        // than downward.
+        //
+        // Resampling is what PaulStretch itself does. Reading the source
+        // 1/factor times as fast raises its pitch by `factor`; the stretch
+        // ratio is scaled to compensate, so the OUTPUT LENGTH is unchanged and
+        // every caller that depends on it still gets what it asked for.
+        let factor = pow(2.0, pitchSemitones / 12.0)
+        let shifting = abs(factor - 1) > 0.001
+        let source = shifting ? StretchKernel.resampled(input, by: 1 / factor) : input
+        let ratio = shifting ? ratio * factor : ratio
+
+        self.inL = source.l
+        self.inR = source.r
+        self.inputLen = source.frameCount
+        self.wrapInput = wrapInput && source.frameCount > 0
         self.phaseRandomness = min(max(phaseRandomness, 0), 1)
         self.onsetSensitivity = min(max(onsetSensitivity, 0), 1)
-        self.pitchFactor = pow(2.0, pitchSemitones / 12.0)
-        self.doPitch = abs(pitchFactor - 1) > 0.001
+        self.pitchFactor = factor
+        // The bin-domain shift is off: the pitch is already in the resampled
+        // source. Doing both would shift twice.
+        self.doPitch = false
         self.spectralDrift = min(max(spectralDrift, 0), 1)
         self.phaseContinuity = min(max(phaseContinuity, 0), 1)
         self.seed = seed
@@ -226,7 +313,7 @@ struct StretchKernel {
         self.halfWindow = windowSize >> 1
         self.outputStride = (windowSize >> 1) >> 1
         self.inputStride = Double((windowSize >> 1) >> 1) / ratio
-        self.outputLength = max(windowSize, Int(Double(input.frameCount) * ratio))
+        self.outputLength = max(windowSize, Int(Double(source.frameCount) * ratio))
         self.lastBlock = (outputLength - (windowSize >> 1) - 1) / ((windowSize >> 1) >> 1)
         self.windowBlocks = windowSize / ((windowSize >> 1) >> 1) + 1
 
