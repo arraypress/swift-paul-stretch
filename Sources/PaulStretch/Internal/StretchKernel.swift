@@ -317,6 +317,18 @@ struct StretchKernel {
         self.lastBlock = (outputLength - (windowSize >> 1) - 1) / ((windowSize >> 1) >> 1)
         self.windowBlocks = windowSize / ((windowSize >> 1) >> 1) + 1
 
+        // Hann, applied TWICE — once on analysis and once on synthesis — at a
+        // hop of windowSize/4.
+        //
+        // Audited against the reference algorithm, which uses (1 - x^2)^1.25 at
+        // 50% overlap. Different window, same requirement: the SQUARED window
+        // must sum to a constant across the overlap, or the output is amplitude
+        // modulated at the hop rate no matter what the spectral stage does.
+        //
+        // Hann^2 = 0.375 - 0.5cos(t) + 0.125cos(2t). At a hop of N/4 the four
+        // overlapping copies put the cos(t) terms 90 degrees apart and the
+        // cos(2t) terms 180 degrees apart, so both cancel and the sum is a flat
+        // 1.5. The choice is therefore equivalent in the property that matters.
         var hann = [Float](repeating: 0, count: windowSize)
         for i in 0..<windowSize {
             hann[i] = Float(0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(windowSize - 1)))

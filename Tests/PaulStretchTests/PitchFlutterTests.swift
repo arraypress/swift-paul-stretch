@@ -41,6 +41,38 @@ final class PitchFlutterTests: XCTestCase {
         return hi - lo
     }
 
+    /// Is the residual ripple a defect, or is a pure tone simply the worst
+    /// possible test signal?
+    ///
+    /// Phase randomisation sums four windows per output sample with random
+    /// relative phases. In ONE bin — which is all a sine occupies — that sum is
+    /// Rayleigh-distributed and swings widely. Broadband material spreads
+    /// across hundreds of bins whose independent swings average out, so if the
+    /// ripple is inherent to the algorithm rather than a bug, noise should be
+    /// far steadier than a tone.
+    func testBroadbandIsFarSteadierThanATone() {
+        var p = StretchParameters()
+        p.targetSeconds = 8
+        p.windowSeconds = 0.25
+        p.phaseRandomness = 1
+        p.fadeInSeconds = 0
+        p.fadeOutSeconds = 0
+
+        var rng = SystemRandomNumberGenerator()
+        let n = Int(2 * 44100.0)
+        let noise = (0..<n).map { _ in Float.random(in: -0.5...0.5, using: &rng) }
+        let broadband = StereoBuffer(l: noise, r: noise, sampleRate: 44100)
+
+        let toneRipple = rippleDB(StretchRenderer.render(tone(), parameters: p))
+        let noiseRipple = rippleDB(StretchRenderer.render(broadband, parameters: p))
+        print("RIPPLE tone=\(String(format: "%.1f", toneRipple)) "
+              + "noise=\(String(format: "%.1f", noiseRipple))")
+
+        XCTAssertLessThan(noiseRipple, 2,
+                          "broadband material must come out steady; ripple on a "
+                          + "pure tone is the algorithm, not a defect")
+    }
+
     /// The report: "+11 or +12 flutters, negative does not".
     func testUpwardPitchShiftRipple() throws {
         let source = tone()
