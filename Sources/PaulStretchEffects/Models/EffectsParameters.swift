@@ -308,6 +308,61 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// full length; see ``AutomationLane`` for curve semantics.
     public var parameterLanes: [String: AutomationLane] = [:]
 
+    // MARK: Chain order
+
+    /// The order the units run in.
+    ///
+    /// Stored as a plain list so a host can reorder the chain — distortion
+    /// before a filter is a different sound from distortion after it, and a
+    /// limiter anywhere but last is not a limiter. Read through
+    /// ``chainOrder`` rather than directly: that accessor fills in any slot the
+    /// stored list is missing, so adding a unit to the library never
+    /// invalidates a saved chain.
+    private var storedChainOrder: [EffectSlot] = EffectSlot.naturalOrder
+
+    /// Every unit exactly once, in running order.
+    ///
+    /// Setting it accepts a partial list; the rest is appended in
+    /// ``EffectSlot/naturalOrder``.
+    public var chainOrder: [EffectSlot] {
+        get { EffectSlot.completed(storedChainOrder) }
+        set { storedChainOrder = EffectSlot.completed(newValue) }
+    }
+
+    /// The stock `AVAudioUnit` slots in running order.
+    public var stockOrder: [EffectSlot] { chainOrder.filter(\.isStockUnit) }
+
+    /// The pure-DSP slots in running order.
+    public var pureOrder: [EffectSlot] { chainOrder.filter { !$0.isStockUnit } }
+
+    /// Moves a unit to a new index among its own half of the chain.
+    ///
+    /// Confined to its half because the two cannot interleave: the stock units
+    /// are separate nodes in the engine graph, and every pure stage runs inside
+    /// one node. A move across the boundary would silently do nothing, so it is
+    /// refused instead.
+    ///
+    /// - Parameters:
+    ///   - slot: The unit to move.
+    ///   - offset: How far to move it: `-1` is one earlier, `+1` one later.
+    /// - Returns: `true` if the chain changed.
+    @discardableResult
+    public mutating func move(_ slot: EffectSlot, by offset: Int) -> Bool {
+        var half = slot.isStockUnit ? stockOrder : pureOrder
+        guard let from = half.firstIndex(of: slot) else { return false }
+        let to = from + offset
+        guard half.indices.contains(to) else { return false }
+        half.remove(at: from)
+        half.insert(slot, at: to)
+        // Reassemble with the other half untouched and in place.
+        let others = slot.isStockUnit ? pureOrder : stockOrder
+        chainOrder = slot.isStockUnit ? half + others : others + half
+        return true
+    }
+
+    /// Puts the chain back the way it shipped.
+    public mutating func resetChainOrder() { storedChainOrder = EffectSlot.naturalOrder }
+
     /// `true` when any effect on the stock `AVAudioUnit` chain is enabled
     /// (everything except the library's own pure-DSP stages).
     public var isStockChainEnabled: Bool {
@@ -418,6 +473,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case tranceGateEnabled, tranceGateRateHz, tranceGateDepth,
              tranceGateSmoothingMs, tranceGatePattern, tranceGateStereoOffset
         case parameterLanes
+        case storedChainOrder
     }
 
     /// Tolerant decoding: any field missing from the JSON (a preset saved
@@ -493,6 +549,10 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         tranceGatePattern = try c.decodeIfPresent([Bool].self, forKey: .tranceGatePattern) ?? tranceGatePattern
         tranceGateStereoOffset = try c.decodeIfPresent(Int.self, forKey: .tranceGateStereoOffset) ?? tranceGateStereoOffset
         parameterLanes = try c.decodeIfPresent([String: AutomationLane].self, forKey: .parameterLanes) ?? parameterLanes
+        // A document written before the chain was reorderable has no order at
+        // all; `completed` turns that into the sequence it used to run in.
+        storedChainOrder = EffectSlot.completed(
+            try c.decodeIfPresent([EffectSlot].self, forKey: .storedChainOrder) ?? [])
     }
 }
 

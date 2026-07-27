@@ -302,6 +302,38 @@ let halo = EffectsBaker.bake(drone, effects: fx)
 try StretchRenderer.renderToWAVFile(source, parameters: params, effects: fx, url: exportURL)
 ```
 
+### Chain order
+
+Order is not a detail: distortion before a filter is a different sound from
+distortion after it, and a limiter anywhere but last is not a limiter. The
+running order lives in the settings as a list of `EffectSlot`, and both halves
+of the chain read it.
+
+```swift
+var fx = EffectsParameters()
+fx.chainOrder                    // every unit exactly once, in running order
+fx.stockOrder                    // the AVAudioUnit half
+fx.pureOrder                     // the pure-DSP half
+
+fx.move(.distortion, by: -2)     // two places earlier; false if it can't move
+fx.resetChainOrder()             // back to how it shipped
+
+chain.install(in: engine, from: player, to: mixer,
+              format: format, order: fx.chainOrder)
+chain.reorder(to: fx.chainOrder) // rewires live; costs a buffer, so not per-knob
+```
+
+The two halves cannot interleave with each other. The stock units are separate
+nodes in the engine graph; every pure-DSP stage runs inside a single node. So a
+move is confined to its own half, and `move` returns `false` rather than
+silently doing nothing.
+
+Setting `chainOrder` accepts a partial list — anything you leave out is appended
+in `EffectSlot.naturalOrder`, and duplicates collapse. That is what makes the
+order safe to persist: adding a unit to the library never invalidates a saved
+chain, and a document written before this feature existed decodes to the
+sequence it always ran in.
+
 ### Realtime effects — tweak while it plays
 
 The stock Apple chain was always live; the library's own DSP used to be baked

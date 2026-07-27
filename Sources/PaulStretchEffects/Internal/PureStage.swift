@@ -50,74 +50,96 @@ func makePureStages(sampleRate: Double,
     let lanes = fx.parameterLanes
     let total = totalFrames
 
-    if fx.wowEnabled {
-        stages.append(WowFlutter(sampleRate: sampleRate,
-                                 amount: fx.wowAmount,
-                                 rateHz: fx.wowRateHz,
-                                 amountLane: lanes["wow.amount"],
-                                 rateLane: lanes["wow.rate"],
-                                 totalFrames: total))
+    func buildWow() -> PureStage {
+        WowFlutter(sampleRate: sampleRate,
+                   amount: fx.wowAmount,
+                   rateHz: fx.wowRateHz,
+                   amountLane: lanes["wow.amount"],
+                   rateLane: lanes["wow.rate"],
+                   totalFrames: total)
     }
-    if fx.sweepFilterEnabled {
-        stages.append(SweepFilter(sampleRate: sampleRate,
-                                  shape: fx.sweepFilterShape,
-                                  cutoff: fx.sweepFilterCutoff,
-                                  resonance: fx.sweepFilterResonance,
-                                  bassCut: fx.sweepFilterBassCut,
-                                  lfoPeriodSeconds: fx.sweepFilterLFOPeriod,
-                                  lfoDepthOctaves: fx.sweepFilterLFODepth,
-                                  cutoffLane: lanes["sweepFilter.cutoff"],
-                                  resonanceLane: lanes["sweepFilter.resonance"],
-                                  totalFrames: total))
+    func buildSweep() -> PureStage {
+        SweepFilter(sampleRate: sampleRate,
+                    shape: fx.sweepFilterShape,
+                    cutoff: fx.sweepFilterCutoff,
+                    resonance: fx.sweepFilterResonance,
+                    bassCut: fx.sweepFilterBassCut,
+                    lfoPeriodSeconds: fx.sweepFilterLFOPeriod,
+                    lfoDepthOctaves: fx.sweepFilterLFODepth,
+                    cutoffLane: lanes["sweepFilter.cutoff"],
+                    resonanceLane: lanes["sweepFilter.resonance"],
+                    totalFrames: total)
     }
-    if fx.tranceGateEnabled {
-        stages.append(TranceGate(sampleRate: sampleRate,
-                                 rateHz: fx.tranceGateRateHz,
-                                 depth: fx.tranceGateDepth,
-                                 smoothingMs: fx.tranceGateSmoothingMs,
-                                 pattern: fx.tranceGatePattern,
-                                 stereoOffset: fx.tranceGateStereoOffset))
+    func buildGate() -> PureStage {
+        TranceGate(sampleRate: sampleRate,
+                   rateHz: fx.tranceGateRateHz,
+                   depth: fx.tranceGateDepth,
+                   smoothingMs: fx.tranceGateSmoothingMs,
+                   pattern: fx.tranceGatePattern,
+                   stereoOffset: fx.tranceGateStereoOffset)
     }
-    if fx.pumpEnabled {
-        stages.append(BreathingPump(sampleRate: sampleRate,
-                                    depth: fx.pumpDepth,
-                                    rateHz: fx.pumpRateHz,
-                                    depthLane: lanes["pump.depth"],
-                                    rateLane: lanes["pump.rate"],
-                                    totalFrames: total))
+    func buildPump() -> PureStage {
+        BreathingPump(sampleRate: sampleRate,
+                      depth: fx.pumpDepth,
+                      rateHz: fx.pumpRateHz,
+                      depthLane: lanes["pump.depth"],
+                      rateLane: lanes["pump.rate"],
+                      totalFrames: total)
     }
-    if fx.autoPanEnabled {
-        stages.append(AutoPan(sampleRate: sampleRate,
-                              depth: fx.autoPanDepth,
-                              rateHz: fx.autoPanRateHz,
-                              depthLane: lanes["autoPan.depth"],
-                              rateLane: lanes["autoPan.rate"],
-                              totalFrames: total))
+    func buildAutoPan() -> PureStage {
+        AutoPan(sampleRate: sampleRate,
+                depth: fx.autoPanDepth,
+                rateHz: fx.autoPanRateHz,
+                depthLane: lanes["autoPan.depth"],
+                rateLane: lanes["autoPan.rate"],
+                totalFrames: total)
     }
-    if fx.shimmerEnabled {
-        stages.append(ShimmerReverb(sampleRate: sampleRate, parameters: fx))
+    func buildShimmer() -> PureStage {
+        ShimmerReverb(sampleRate: sampleRate, parameters: fx)
     }
-    if fx.convolutionReverbEnabled {
+    func buildSpace() -> PureStage {
         // A custom impulse (decoded from the embedded bytes) replaces the
         // generated profile; decode failures fall back to the profile.
         if let data = fx.convolutionReverbCustomIRData,
            let impulse = decodeImpulse(data, sampleRate: sampleRate) {
-            stages.append(ConvolutionReverb(sampleRate: sampleRate,
-                                            impulse: impulse,
-                                            mix: fx.convolutionReverbMix,
-                                            mixLane: lanes["convolutionReverb.mix"],
-                                            totalFrames: total))
-        } else {
-            stages.append(ConvolutionReverb(sampleRate: sampleRate,
-                                            profile: fx.convolutionReverbProfile,
-                                            decaySeconds: Double(fx.convolutionReverbDecaySeconds),
-                                            mix: fx.convolutionReverbMix,
-                                            mixLane: lanes["convolutionReverb.mix"],
-                                            totalFrames: total))
+            return ConvolutionReverb(sampleRate: sampleRate,
+                                     impulse: impulse,
+                                     mix: fx.convolutionReverbMix,
+                                     mixLane: lanes["convolutionReverb.mix"],
+                                     totalFrames: total)
+        }
+        return ConvolutionReverb(sampleRate: sampleRate,
+                                 profile: fx.convolutionReverbProfile,
+                                 decaySeconds: Double(fx.convolutionReverbDecaySeconds),
+                                 mix: fx.convolutionReverbMix,
+                                 mixLane: lanes["convolutionReverb.mix"],
+                                 totalFrames: total)
+    }
+    func buildPlacement() -> PureStage {
+        StereoPlacement(pan: fx.placementPan, width: fx.placementWidth)
+    }
+
+    /// Builds one slot's stage, or nothing if that unit is off.
+    ///
+    /// The ladder below used to run in source order, which made the chain's
+    /// sequence an implementation detail. It is driven by `fx.chainOrder` now,
+    /// so a host can put the gate before the shimmer or after it.
+    func stage(for slot: EffectSlot) -> PureStage? {
+        switch slot {
+        case .wow:         return fx.wowEnabled ? buildWow() : nil
+        case .sweepFilter: return fx.sweepFilterEnabled ? buildSweep() : nil
+        case .gate:        return fx.tranceGateEnabled ? buildGate() : nil
+        case .pump:        return fx.pumpEnabled ? buildPump() : nil
+        case .autoPan:     return fx.autoPanEnabled ? buildAutoPan() : nil
+        case .shimmer:     return fx.shimmerEnabled ? buildShimmer() : nil
+        case .space:       return fx.convolutionReverbEnabled ? buildSpace() : nil
+        case .placement:   return fx.placementEnabled ? buildPlacement() : nil
+        default:           return nil          // stock units are not built here
         }
     }
-    if fx.placementEnabled {
-        stages.append(StereoPlacement(pan: fx.placementPan, width: fx.placementWidth))
+
+    for slot in fx.pureOrder {
+        if let s = stage(for: slot) { stages.append(s) }
     }
     return stages
 }

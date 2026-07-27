@@ -72,27 +72,75 @@ public final class EffectChain {
     /// Creates a chain with all nodes unattached.
     public init() {}
 
-    /// Attaches every node to `engine` and wires
-    /// `source → filter → eq → delay → reverb → dest`.
+    /// The node for a slot, or `nil` for slots this chain does not own.
+    private func node(for slot: EffectSlot) -> AVAudioNode? {
+        switch slot {
+        case .filter:     return filter
+        case .eq:         return eq
+        case .distortion: return distortion
+        case .delay:      return delay
+        case .reverb:     return reverb
+        case .compressor: return dynamics
+        case .limiter:    return limiter
+        default:          return nil
+        }
+    }
+
+    /// How the chain is currently wired, so a reorder knows whether it has
+    /// anything to do and can rewire without being told the graph again.
+    private var wiring: (engine: AVAudioEngine, source: AVAudioNode,
+                         dest: AVAudioNode, format: AVAudioFormat, order: [EffectSlot])?
+
+    /// Attaches every node to `engine` and wires them in series between
+    /// `source` and `dest`.
     ///
     /// - Parameters:
     ///   - engine: The engine to attach to.
     ///   - source: The upstream node (typically an `AVAudioPlayerNode`).
     ///   - dest: The downstream node (typically the main mixer).
     ///   - format: The connection format.
+    ///   - order: The running order. Defaults to the sequence the chain has
+    ///     always used.
     public func install(in engine: AVAudioEngine, from source: AVAudioNode,
-                        to dest: AVAudioNode, format: AVAudioFormat) {
+                        to dest: AVAudioNode, format: AVAudioFormat,
+                        order: [EffectSlot] = EffectSlot.naturalOrder) {
         for n in [filter, eq, distortion, delay, reverb, dynamics, limiter] as [AVAudioNode] {
             engine.attach(n)
         }
-        engine.connect(source, to: filter, format: format)
-        engine.connect(filter, to: eq, format: format)
-        engine.connect(eq, to: distortion, format: format)
-        engine.connect(distortion, to: delay, format: format)
-        engine.connect(delay, to: reverb, format: format)
-        engine.connect(reverb, to: dynamics, format: format)
-        engine.connect(dynamics, to: limiter, format: format)
-        engine.connect(limiter, to: dest, format: format)
+        connect(in: engine, from: source, to: dest, format: format, order: order)
+    }
+
+    /// Rewires the chain into a new order.
+    ///
+    /// Safe to call while the engine runs, but not free: `AVAudioEngine`
+    /// rebuilds the graph, which can cost a buffer. Reordering is a deliberate
+    /// act, not something to drive from a knob.
+    ///
+    /// - Parameter order: The new running order.
+    public func reorder(to order: [EffectSlot]) {
+        guard let w = wiring else { return }
+        let wanted = EffectSlot.completed(order).filter(\.isStockUnit)
+        guard wanted != w.order.filter(\.isStockUnit) else { return }
+        connect(in: w.engine, from: w.source, to: w.dest, format: w.format, order: wanted)
+    }
+
+    /// Wires `source → …units… → dest` in the given order.
+    private func connect(in engine: AVAudioEngine, from source: AVAudioNode,
+                         to dest: AVAudioNode, format: AVAudioFormat,
+                         order: [EffectSlot]) {
+        let units = EffectSlot.completed(order).compactMap(node(for:))
+        // Break the old wiring first. Reconnecting a node that still has an
+        // output leaves the engine holding both edges, and the stale one wins.
+        for n in units { engine.disconnectNodeOutput(n) }
+        engine.disconnectNodeOutput(source)
+
+        var upstream = source
+        for n in units {
+            engine.connect(upstream, to: n, format: format)
+            upstream = n
+        }
+        engine.connect(upstream, to: dest, format: format)
+        wiring = (engine, source, dest, format, EffectSlot.completed(order))
     }
 
     /// Pushes a parameter set into the chain. Safe to call while audio runs.
