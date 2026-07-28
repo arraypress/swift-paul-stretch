@@ -69,6 +69,15 @@ public final class EffectChain {
         AudioUnitSetParameter(unit.audioUnit, id, kAudioUnitScope_Global, 0, value, 0)
     }
 
+    /// The presets currently loaded, so they are not reloaded on every apply.
+    ///
+    /// `loadFactoryPreset` rebuilds the unit's internal state. `apply` runs on
+    /// every parameter change, and automation calls it thirty times a second —
+    /// so an automated reverb mix was tearing down and rebuilding the reverb at
+    /// 30 Hz, which is both wasteful and audible as the tail restarting.
+    private var loadedReverbPreset: ReverbPreset?
+    private var loadedDistortionPreset: DistortionPreset?
+
     /// Creates a chain with all nodes unattached.
     public init() {}
 
@@ -175,13 +184,19 @@ public final class EffectChain {
         delay.bypass = !fx.delayEnabled
 
         // Distortion
-        distortion.loadFactoryPreset(fx.distortionPreset.avPreset)
+        if loadedDistortionPreset != fx.distortionPreset {
+            distortion.loadFactoryPreset(fx.distortionPreset.avPreset)
+            loadedDistortionPreset = fx.distortionPreset
+        }
         distortion.preGain = max(-80, min(fx.distortionPreGain, 20))
         distortion.wetDryMix = fx.distortionEnabled ? max(0, min(fx.distortionMix, 100)) : 0
         distortion.bypass = !fx.distortionEnabled
 
         // Reverb
-        reverb.loadFactoryPreset(fx.reverbPreset.avPreset)
+        if loadedReverbPreset != fx.reverbPreset {
+            reverb.loadFactoryPreset(fx.reverbPreset.avPreset)
+            loadedReverbPreset = fx.reverbPreset
+        }
         reverb.wetDryMix = fx.reverbEnabled ? max(0, min(fx.reverbMix, 100)) : 0
         reverb.bypass = !fx.reverbEnabled
 
