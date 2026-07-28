@@ -229,6 +229,34 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// the LFO.
     public var sweepFilterLFODepth: Float = 0
 
+    // MARK: Pitch
+
+    /// Whether the live pitch shifter is active.
+    public var pitchEnabled = false
+
+    /// Coarse shift, in semitones (`-24…24`).
+    ///
+    /// Distinct from the stretch recipe's pitch, which is baked into a render.
+    /// This one is a live parameter, so a curve can glide it across a whole
+    /// piece — which is the point of having it.
+    public var pitchSemitones: Float = 0
+
+    /// Fine shift, in cents (`-100…100`).
+    public var pitchCents: Float = 0
+
+    /// Detune between voices, in cents (`0…50`).
+    ///
+    /// Zero makes every voice identical, so voice count alone does nothing.
+    /// This is the control that makes a static drone breathe.
+    public var pitchSpread: Float = 0
+
+    /// How many voices (`1…4`), spread across the stereo field.
+    public var pitchVoices: Int = 2
+
+    /// Wet blend (`0…100`). Below 100 the dry signal remains, so a shifted
+    /// voice is an INTERVAL rather than a transposition.
+    public var pitchMix: Float = 50
+
     // MARK: Tape wow & flutter
 
     /// Whether wow/flutter is active (baked path — see ``WowFlutter``).
@@ -376,6 +404,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case .shimmer:     return shimmerEnabled
         case .space:       return convolutionReverbEnabled
         case .placement:   return placementEnabled
+        case .pitch:       return pitchEnabled
         }
     }
 
@@ -397,6 +426,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case .shimmer:     shimmerEnabled = on
         case .space:       convolutionReverbEnabled = on
         case .placement:   placementEnabled = on
+        case .pitch:       pitchEnabled = on
         }
     }
 
@@ -546,6 +576,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         case sweepFilterEnabled, sweepFilterShape, sweepFilterCutoff,
              sweepFilterResonance, sweepFilterBassCut,
              sweepFilterLFOPeriod, sweepFilterLFODepth
+        case pitchEnabled, pitchSemitones, pitchCents, pitchSpread, pitchVoices, pitchMix
         case wowEnabled, wowAmount, wowRateHz
         case pumpEnabled, pumpDepth, pumpRateHz
         case autoPanEnabled, autoPanDepth, autoPanRateHz
@@ -611,6 +642,12 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         sweepFilterBassCut = try c.decodeIfPresent(Float.self, forKey: .sweepFilterBassCut) ?? sweepFilterBassCut
         sweepFilterLFOPeriod = try c.decodeIfPresent(Float.self, forKey: .sweepFilterLFOPeriod) ?? sweepFilterLFOPeriod
         sweepFilterLFODepth = try c.decodeIfPresent(Float.self, forKey: .sweepFilterLFODepth) ?? sweepFilterLFODepth
+        pitchEnabled = try c.decodeIfPresent(Bool.self, forKey: .pitchEnabled) ?? pitchEnabled
+        pitchSemitones = try c.decodeIfPresent(Float.self, forKey: .pitchSemitones) ?? pitchSemitones
+        pitchCents = try c.decodeIfPresent(Float.self, forKey: .pitchCents) ?? pitchCents
+        pitchSpread = try c.decodeIfPresent(Float.self, forKey: .pitchSpread) ?? pitchSpread
+        pitchVoices = try c.decodeIfPresent(Int.self, forKey: .pitchVoices) ?? pitchVoices
+        pitchMix = try c.decodeIfPresent(Float.self, forKey: .pitchMix) ?? pitchMix
         wowEnabled = try c.decodeIfPresent(Bool.self, forKey: .wowEnabled) ?? wowEnabled
         wowAmount = try c.decodeIfPresent(Float.self, forKey: .wowAmount) ?? wowAmount
         wowRateHz = try c.decodeIfPresent(Float.self, forKey: .wowRateHz) ?? wowRateHz

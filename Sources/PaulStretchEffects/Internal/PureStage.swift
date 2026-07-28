@@ -115,6 +115,14 @@ func makePureStages(sampleRate: Double,
                                  mixLane: lanes["convolutionReverb.mix"],
                                  totalFrames: total)
     }
+    func buildPitch() -> PureStage {
+        PitchVoices(sampleRate: sampleRate,
+                    semitones: Double(fx.pitchSemitones),
+                    cents: Double(fx.pitchCents),
+                    spread: Double(fx.pitchSpread),
+                    voiceCount: fx.pitchVoices,
+                    mix: Double(fx.pitchMix))
+    }
     func buildPlacement() -> PureStage {
         StereoPlacement(pan: fx.placementPan, width: fx.placementWidth)
     }
@@ -134,6 +142,7 @@ func makePureStages(sampleRate: Double,
         case .shimmer:     return fx.shimmerEnabled ? buildShimmer() : nil
         case .space:       return fx.convolutionReverbEnabled ? buildSpace() : nil
         case .placement:   return fx.placementEnabled ? buildPlacement() : nil
+        case .pitch:       return fx.pitchEnabled ? buildPitch() : nil
         default:           return nil          // stock units are not built here
         }
     }

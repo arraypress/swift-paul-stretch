@@ -27,7 +27,7 @@ public enum EffectSlot: String, Codable, CaseIterable, Sendable {
     // Stock AVAudioUnits, wired into the engine graph.
     case filter, eq, distortion, delay, reverb, compressor, limiter
     // Pure-DSP stages, run in sequence inside one node.
-    case wow, sweepFilter, gate, pump, autoPan, shimmer, space, placement
+    case wow, sweepFilter, gate, pump, autoPan, shimmer, space, placement, pitch
 
     /// `true` when this slot is an `AVAudioUnit` in the engine graph rather
     /// than a pure-DSP stage.
@@ -63,6 +63,7 @@ public enum EffectSlot: String, Codable, CaseIterable, Sendable {
         case .shimmer:     return "Shimmer"
         case .space:       return "Space"
         case .placement:   return "Place"
+        case .pitch:       return "Pitch"
         }
     }
 
@@ -72,7 +73,9 @@ public enum EffectSlot: String, Codable, CaseIterable, Sendable {
     /// as it did.
     public static let naturalOrder: [EffectSlot] = [
         .filter, .eq, .distortion, .delay, .reverb, .compressor, .limiter,
-        .wow, .sweepFilter, .gate, .pump, .autoPan, .shimmer, .space, .placement,
+        // Pitch sits before the reverbs: shifting a tail smears it, where
+        // shifting into them lets each voice ring out in the same space.
+        .wow, .pitch, .sweepFilter, .gate, .pump, .autoPan, .shimmer, .space, .placement,
     ]
 
     /// Completes a partial order.
