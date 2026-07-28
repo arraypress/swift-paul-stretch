@@ -103,3 +103,59 @@ final class EffectSlotTests: XCTestCase {
         XCTAssertTrue(stages[1] is TranceGate)
     }
 }
+
+/// Chain membership: a device you switched off is still in the chain.
+final class DeviceMembershipTests: XCTestCase {
+
+    /// Adding puts it in AND switches it on.
+    func testAddingADeviceEnablesIt() {
+        var fx = EffectsParameters()
+        XCTAssertTrue(fx.devices.isEmpty)
+        fx.addDevice(.reverb)
+        XCTAssertTrue(fx.devices.contains(.reverb))
+        XCTAssertTrue(fx.reverbEnabled)
+    }
+
+    /// Removing takes it out AND switches it off — a device out of the chain
+    /// that carried on processing would be a ghost.
+    func testRemovingADeviceDisablesIt() {
+        var fx = EffectsParameters()
+        fx.addDevice(.delay)
+        fx.removeDevice(.delay)
+        XCTAssertFalse(fx.devices.contains(.delay))
+        XCTAssertFalse(fx.delayEnabled)
+    }
+
+    /// The point of the whole change: switching a device OFF must not remove
+    /// it. You add a reverb, dial it in, bypass it to compare, and it has to
+    /// still be there — with its settings.
+    func testDisablingKeepsMembershipAndSettings() throws {
+        var fx = EffectsParameters()
+        fx.addDevice(.reverb)
+        fx.reverbMix = 71
+        fx.setEnabled(.reverb, false)
+
+        XCTAssertTrue(fx.devices.contains(.reverb), "off is not removed")
+        XCTAssertFalse(fx.reverbEnabled)
+
+        let decoded = try JSONDecoder().decode(EffectsParameters.self,
+                                               from: JSONEncoder().encode(fx))
+        XCTAssertTrue(decoded.devices.contains(.reverb),
+                      "and it must survive a save and reopen")
+        XCTAssertEqual(decoded.reverbMix, 71, "with what you dialled in")
+        XCTAssertFalse(decoded.reverbEnabled)
+    }
+
+    /// A document written before membership existed opens as the chain it was.
+    func testOlderDocumentsInferMembershipFromWhatIsOn() throws {
+        let legacy = #"{"reverbEnabled":true,"delayEnabled":true,"reverbMix":50}"#
+        let fx = try JSONDecoder().decode(EffectsParameters.self, from: Data(legacy.utf8))
+        XCTAssertEqual(fx.devices, [.reverb, .delay])
+    }
+
+    /// An empty chain stays empty rather than inferring everything.
+    func testAnEmptyChainDecodesEmpty() throws {
+        let fx = try JSONDecoder().decode(EffectsParameters.self, from: Data("{}".utf8))
+        XCTAssertTrue(fx.devices.isEmpty)
+    }
+}

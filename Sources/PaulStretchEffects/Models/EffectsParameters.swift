@@ -320,6 +320,86 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// invalidates a saved chain.
     private var storedChainOrder: [EffectSlot] = EffectSlot.naturalOrder
 
+    /// Which units are IN the chain, whether or not they are switched on.
+    ///
+    /// Membership and on/off are different questions. A device you added,
+    /// dialled in, and then switched off to compare is still part of the chain
+    /// — deriving membership from `enabled` meant it vanished on the next
+    /// save, taking its settings with it.
+    ///
+    /// `nil` means "never recorded", which is what every document written
+    /// before this existed says. Read through ``devices``, which answers that
+    /// case from the enabled flags so an old chain opens as the chain it was.
+    private var storedDevices: Set<EffectSlot>?
+
+    /// The units in the chain.
+    public var devices: Set<EffectSlot> {
+        get { storedDevices ?? Set(EffectSlot.allCases.filter { isEnabled($0) }) }
+        set { storedDevices = newValue }
+    }
+
+    /// Adds a unit to the chain and switches it on.
+    ///
+    /// Added means ON: dropping a device in and hearing nothing would read as
+    /// the add having failed.
+    public mutating func addDevice(_ slot: EffectSlot) {
+        var d = devices
+        d.insert(slot)
+        devices = d
+        setEnabled(slot, true)
+    }
+
+    /// Removes a unit from the chain and switches it off — a device out of the
+    /// chain that carried on processing would be a ghost.
+    public mutating func removeDevice(_ slot: EffectSlot) {
+        var d = devices
+        d.remove(slot)
+        devices = d
+        setEnabled(slot, false)
+    }
+
+    /// Whether a unit is switched on.
+    public func isEnabled(_ slot: EffectSlot) -> Bool {
+        switch slot {
+        case .filter:      return filterEnabled
+        case .eq:          return eqEnabled
+        case .distortion:  return distortionEnabled
+        case .delay:       return delayEnabled
+        case .reverb:      return reverbEnabled
+        case .compressor:  return compressorEnabled
+        case .limiter:     return limiterEnabled
+        case .wow:         return wowEnabled
+        case .sweepFilter: return sweepFilterEnabled
+        case .gate:        return tranceGateEnabled
+        case .pump:        return pumpEnabled
+        case .autoPan:     return autoPanEnabled
+        case .shimmer:     return shimmerEnabled
+        case .space:       return convolutionReverbEnabled
+        case .placement:   return placementEnabled
+        }
+    }
+
+    /// Switches a unit on or off, leaving its membership alone.
+    public mutating func setEnabled(_ slot: EffectSlot, _ on: Bool) {
+        switch slot {
+        case .filter:      filterEnabled = on
+        case .eq:          eqEnabled = on
+        case .distortion:  distortionEnabled = on
+        case .delay:       delayEnabled = on
+        case .reverb:      reverbEnabled = on
+        case .compressor:  compressorEnabled = on
+        case .limiter:     limiterEnabled = on
+        case .wow:         wowEnabled = on
+        case .sweepFilter: sweepFilterEnabled = on
+        case .gate:        tranceGateEnabled = on
+        case .pump:        pumpEnabled = on
+        case .autoPan:     autoPanEnabled = on
+        case .shimmer:     shimmerEnabled = on
+        case .space:       convolutionReverbEnabled = on
+        case .placement:   placementEnabled = on
+        }
+    }
+
     /// Every unit exactly once, in running order.
     ///
     /// Setting it accepts a partial list; the rest is appended in
@@ -474,6 +554,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
              tranceGateSmoothingMs, tranceGatePattern, tranceGateStereoOffset
         case parameterLanes
         case storedChainOrder
+        case storedDevices
     }
 
     /// Tolerant decoding: any field missing from the JSON (a preset saved
@@ -553,6 +634,9 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         // all; `completed` turns that into the sequence it used to run in.
         storedChainOrder = EffectSlot.completed(
             try c.decodeIfPresent([EffectSlot].self, forKey: .storedChainOrder) ?? [])
+        // Absent in every document written before membership was recorded;
+        // `devices` answers that case from the enabled flags.
+        storedDevices = try c.decodeIfPresent(Set<EffectSlot>.self, forKey: .storedDevices)
     }
 }
 
