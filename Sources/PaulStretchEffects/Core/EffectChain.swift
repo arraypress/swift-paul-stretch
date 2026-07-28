@@ -162,6 +162,25 @@ public final class EffectChain {
     private func connect(in engine: AVAudioEngine, from source: AVAudioNode,
                          to dest: AVAudioNode, format: AVAudioFormat,
                          order: [EffectSlot]) {
+        // Rewiring a RUNNING engine silences the path.
+        //
+        // Switching a unit on changes this chain's topology, and an
+        // `AVAudioUnit` that was attached but never connected has not been
+        // prepared — connecting it into a live graph leaves the layer mute
+        // until the engine is restarted. Adding an EQ mid-playback did exactly
+        // that: the layer went silent and stayed silent.
+        //
+        // Stopping and restarting around the change costs a buffer, which is
+        // the correct price for a deliberate act like adding a device.
+        let wasRunning = engine.isRunning
+        if wasRunning { engine.stop() }
+        defer {
+            if wasRunning {
+                engine.prepare()
+                try? engine.start()
+            }
+        }
+
         // Only the units that are ON. Everything else stays attached but out
         // of the path, so it costs nothing until it is switched on.
         let units = EffectSlot.completed(order)
