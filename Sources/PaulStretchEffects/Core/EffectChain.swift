@@ -100,6 +100,14 @@ public final class EffectChain {
     private var wiring: (engine: AVAudioEngine, source: AVAudioNode,
                          dest: AVAudioNode, format: AVAudioFormat, order: [EffectSlot])?
 
+    /// The units currently WIRED IN, as opposed to merely attached.
+    ///
+    /// A bypassed `AVAudioUnit` is not free: the engine still pulls a buffer
+    /// through it every quantum. Wiring all seven regardless meant a project
+    /// with no effects at all still rendered through fourteen units on two
+    /// layers plus seven on the master — measurable CPU for nothing.
+    private var activeUnits: Set<EffectSlot> = []
+
     /// Attaches every node to `engine` and wires them in series between
     /// `source` and `dest`.
     ///
@@ -112,11 +120,28 @@ public final class EffectChain {
     ///     always used.
     public func install(in engine: AVAudioEngine, from source: AVAudioNode,
                         to dest: AVAudioNode, format: AVAudioFormat,
-                        order: [EffectSlot] = EffectSlot.naturalOrder) {
+                        order: [EffectSlot] = EffectSlot.naturalOrder,
+                        active: Set<EffectSlot> = []) {
         for n in [filter, eq, distortion, delay, reverb, dynamics, limiter] as [AVAudioNode] {
             engine.attach(n)
         }
+        activeUnits = active
         connect(in: engine, from: source, to: dest, format: format, order: order)
+    }
+
+    /// Rewires so only the switched-on units are in the path.
+    ///
+    /// Called from ``apply(_:)`` when the enabled set changes, which is a
+    /// deliberate act — switching a unit on or off — rather than something a
+    /// knob does.
+    private func updateActiveUnits(_ fx: EffectsParameters) {
+        let wanted = Set(EffectSlot.allCases.filter { $0.isStockUnit && fx.isEnabled($0) })
+        guard wanted != activeUnits, let w = wiring else {
+            activeUnits = wanted
+            return
+        }
+        activeUnits = wanted
+        connect(in: w.engine, from: w.source, to: w.dest, format: w.format, order: w.order)
     }
 
     /// Rewires the chain into a new order.
@@ -137,7 +162,11 @@ public final class EffectChain {
     private func connect(in engine: AVAudioEngine, from source: AVAudioNode,
                          to dest: AVAudioNode, format: AVAudioFormat,
                          order: [EffectSlot]) {
-        let units = EffectSlot.completed(order).compactMap(node(for:))
+        // Only the units that are ON. Everything else stays attached but out
+        // of the path, so it costs nothing until it is switched on.
+        let units = EffectSlot.completed(order)
+            .filter { activeUnits.contains($0) }
+            .compactMap(node(for:))
         // Break the old wiring first. Reconnecting a node that still has an
         // output leaves the engine holding both edges, and the stale one wins.
         for n in units { engine.disconnectNodeOutput(n) }
@@ -156,6 +185,7 @@ public final class EffectChain {
     ///
     /// - Parameter fx: The settings to apply.
     public func apply(_ fx: EffectsParameters) {
+        updateActiveUnits(fx)
         // Filter (1-band resonant low-pass)
         let fb = filter.bands[0]
         fb.filterType = fx.filterResonance > 0.1 ? .resonantLowPass : .lowPass
