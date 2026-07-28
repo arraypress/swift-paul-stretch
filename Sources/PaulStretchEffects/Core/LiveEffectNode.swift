@@ -32,6 +32,16 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
     /// not freshly allocated on top of what the stages already allocate.
     private var scratchL: [Float] = []
     private var scratchR: [Float] = []
+    /// Exactly-quantum-sized buffers handed to the chain.
+    ///
+    /// `render` takes `[Float]` sized to the quantum, and slicing the scratch
+    /// buffers to build them — `Array(scratchL[0..<n])` — ALLOCATED twice per
+    /// quantum on the audio thread. `malloc` can take a lock, and a blocked
+    /// audio thread is a dropout; it is also pure waste at 86 quanta a second
+    /// per layer. These are resized only when the quantum size changes, which
+    /// happens once.
+    private var workL: [Float] = []
+    private var workR: [Float] = []
 
     /// Backing store for the output bus when the host hands us null pointers.
     private var ownedBuffer: AVAudioPCMBuffer?
@@ -68,6 +78,8 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
     public override func allocateRenderResources() throws {
         try super.allocateRenderResources()
         let n = Int(maximumFramesToRender)
+        workL = [Float](repeating: 0, count: n)
+        workR = [Float](repeating: 0, count: n)
         scratchL = [Float](repeating: 0, count: n)
         scratchR = [Float](repeating: 0, count: n)
         ownedBuffer = AVAudioPCMBuffer(pcmFormat: outBus.format,
@@ -78,6 +90,7 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
     public override func deallocateRenderResources() {
         ownedBuffer = nil
         scratchL = []; scratchR = []
+        workL = []; workR = []
         super.deallocateRenderResources()
     }
 
@@ -122,16 +135,20 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
                   let rp = ablOut[1].mData?.assumingMemoryBound(to: Float.self)
             else { return noErr }   // mono or oversized quantum: pass through
 
-            scratchL.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: lp, count: n) }
-            scratchR.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: rp, count: n) }
-
-            // `render` wants exactly-sized arrays; slice to the quantum,
-            // process, then copy back over the output list.
-            var l = Array(scratchL[0..<n])
-            var r = Array(scratchR[0..<n])
-            chain.render(l: &l, r: &r)
-            l.withUnsafeBufferPointer { lp.update(from: $0.baseAddress!, count: n) }
-            r.withUnsafeBufferPointer { rp.update(from: $0.baseAddress!, count: n) }
+            // `render` wants arrays sized exactly to the quantum. Reused, not
+            // rebuilt: slicing allocated two arrays per quantum on the audio
+            // thread. A short quantum only happens at the very end of a stream,
+            // and resizing then is a single allocation rather than one per
+            // callback.
+            if workL.count != n {
+                workL = [Float](repeating: 0, count: n)
+                workR = [Float](repeating: 0, count: n)
+            }
+            workL.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: lp, count: n) }
+            workR.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: rp, count: n) }
+            chain.render(l: &workL, r: &workR)
+            workL.withUnsafeBufferPointer { lp.update(from: $0.baseAddress!, count: n) }
+            workR.withUnsafeBufferPointer { rp.update(from: $0.baseAddress!, count: n) }
 
             return noErr
         }
