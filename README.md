@@ -334,6 +334,27 @@ order safe to persist: adding a unit to the library never invalidates a saved
 chain, and a document written before this feature existed decodes to the
 sequence it always ran in.
 
+### Pitch — a live shifter with detuned voices
+
+```swift
+fx.pitchEnabled = true
+fx.pitchSemitones = 7      // a fifth up, automatable by the host
+fx.pitchCents = 0
+fx.pitchSpread = 12        // cents between voices — this is what makes a drone move
+fx.pitchVoices = 3         // spread across the stereo field
+fx.pitchMix = 50           // below 100 keeps the dry, so it is an INTERVAL not a transposition
+```
+
+A crossfaded delay line, not an FFT. Reading a buffer faster or slower than it is written IS a pitch
+shift; the only problem is the wrap, and two taps half a buffer apart windowed by Hann solve it —
+`w(x) + w(x + 0.5) == 1` for Hann, so the pair sums to unity while each tap is silent exactly where
+it wraps.
+
+`StretchParameters.pitchSemitones` is a different thing: it is baked into a render, so it cannot be
+drawn on a curve. It shifts by RESAMPLING the input and compensating the ratio, which is what
+PaulStretch itself does — bin remapping was not phase-coherent and flutter measured worse shifting
+up than down.
+
 ### Realtime effects — tweak while it plays
 
 The stock Apple chain was always live; the library's own DSP used to be baked
@@ -499,6 +520,22 @@ arithmetic is identical down to the operation order, which is why the
 outputs match bit for bit.
 
 ## Performance & Memory
+
+**A bypassed `AVAudioUnit` is not free.** `EffectChain` wires in only the units that are switched
+on; the rest stay attached and out of the path. Measured on a host playing two layers with no
+effects: 12.8% of a core with everything wired, 6.5% with only what is on.
+
+**Rewiring stops the engine.** Switching a unit on changes the chain's topology, and an
+`AVAudioUnit` that was attached but never connected has not been prepared — connecting it into a
+live graph leaves the path mute. `apply` stops and restarts around the change, which costs a buffer.
+A host must RE-ARM its players afterwards, because stopping drops what they had scheduled.
+
+**Relative cost of the pure-DSP stages**, measured on six voices against a silent baseline: shimmer
+is by far the most expensive, roughly 2.5x the convolution reverb — which is the only stage using
+vDSP and therefore one of the cheapest. Shimmer and pitch are feedback algorithms and cannot be
+parallelised, on the CPU or anywhere else.
+
+
 
 Measured on an M-series Mac (14 cores), 3 s source → 10-minute render:
 
