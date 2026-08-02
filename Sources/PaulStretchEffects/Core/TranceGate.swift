@@ -57,16 +57,26 @@ final class TranceGate {
 
     private let sampleRate: Double
     private let pattern: [Bool]
-    private let depth: Float
-    private let stereoOffset: Int
-    private let framesPerStep: Double
+    /// How far closed steps duck, slewed toward `targetDepth` — it sets the
+    /// gate floor directly, and the envelope's own ramp can be well under a
+    /// millisecond, too fast to hide a stepped knob move.
+    private var depth: Float
+    private var targetDepth: Float
+    private var stereoOffset: Int
+    /// Steps advanced per frame. A retune changes this increment only, so the
+    /// pattern speeds up or slows down from wherever it is — deriving the step
+    /// from the absolute frame index would teleport it instead.
+    private var stepInc: Double
+    /// Position within the pattern, in steps (`0..<pattern.count`), wrapped
+    /// at the pattern length so precision never degrades over a long piece.
+    private var stepPhase = 0.0
     /// Ramp coefficient — how far the envelope moves toward its target each
-    /// frame. Derived from the smoothing time.
-    private let slew: Float
+    /// frame. Derived from the smoothing time; applied instantly on retune
+    /// because the envelope it shapes is continuous state either way.
+    private var slew: Float
+    /// One-pole coefficient for the ~30 ms depth slew.
+    private let paramSlew: Float
 
-    /// Absolute frame position, so the pattern stays locked to the timeline
-    /// across chunk boundaries.
-    private var frame: Int = 0
     private var envL: Float = 1
     private var envR: Float = 1
 
@@ -83,23 +93,27 @@ final class TranceGate {
          smoothingMs: Float, pattern: [Bool], stereoOffset: Int) {
         self.sampleRate = sampleRate
         self.pattern = pattern.isEmpty ? TranceGatePattern.eighths : pattern
-        self.depth = min(max(depth, 0), 1)
+        let d = min(max(depth, 0), 1)
+        self.depth = d
+        self.targetDepth = d
         self.stereoOffset = stereoOffset
-        let rate = Double(max(0.01, rateHz))
-        framesPerStep = max(1, sampleRate / rate)
+        // Clamped so a step can never be shorter than one frame.
+        stepInc = min(1, Double(max(0.01, rateHz)) / sampleRate)
         // One-pole ramp reaching ~63 % in the smoothing time; clamped so a
         // zero setting still takes a couple of frames and cannot click.
         let ms = Double(max(0.5, smoothingMs))
         slew = Float(1.0 - exp(-1.0 / (ms * 0.001 * sampleRate)))
+        // One-pole reaching ~63 % of a step in 30 ms.
+        paramSlew = Float(1 - exp(-1 / (0.03 * sampleRate)))
     }
 
-    /// The gate level for a given absolute frame and channel offset.
+    /// The gate level for a pattern step and channel offset.
     @inline(__always)
-    private func target(at f: Int, offset: Int) -> Float {
-        let step = Int((Double(f) / framesPerStep).rounded(.down)) + offset
+    private func target(step: Int, offset: Int) -> Float {
+        let s = step + offset
         // Swift's % keeps the sign of the dividend, so a negative offset
         // needs correcting or the pattern index goes out of range.
-        let idx = ((step % pattern.count) + pattern.count) % pattern.count
+        let idx = ((s % pattern.count) + pattern.count) % pattern.count
         return pattern[idx] ? 1 : (1 - depth)
     }
 
@@ -107,20 +121,37 @@ final class TranceGate {
         let n = min(l.count, r.count)
         var outL = [Float](repeating: 0, count: n)
         var outR = [Float](repeating: 0, count: n)
+        let patternLength = Double(pattern.count)
         for i in 0..<n {
-            let f = frame + i
-            envL += (target(at: f, offset: 0) - envL) * slew
-            envR += (target(at: f, offset: stereoOffset) - envR) * slew
+            depth += (targetDepth - depth) * paramSlew
+            let step = Int(stepPhase)
+            envL += (target(step: step, offset: 0) - envL) * slew
+            envR += (target(step: step, offset: stereoOffset) - envR) * slew
             outL[i] = l[i] * envL
             outR[i] = r[i] * envR
+            stepPhase += stepInc
+            if stepPhase >= patternLength { stepPhase -= patternLength }
         }
-        frame += n
         return (outL, outR)
     }
 
     func tail() -> (l: [Float], r: [Float]) { ([], []) }
 }
 
-extension TranceGate: PureStage {}
+extension TranceGate: PureStage {
+    /// Retunes rate, depth, smoothing and stereo offset in place — the
+    /// PATTERN is structural (it re-anchors the phase) and is ignored here.
+    /// Depth is a slew target; rate changes the step increment only, so the
+    /// pulse stays where it is; a new offset or smoothing rides the envelope
+    /// ramp like any other gate edge. Runs on the audio thread — plain
+    /// stored writes only. Clamps match the initialiser's.
+    func update(from fx: EffectsParameters) {
+        stepInc = min(1, Double(max(0.01, fx.tranceGateRateHz)) / sampleRate)
+        targetDepth = min(max(fx.tranceGateDepth, 0), 1)
+        let ms = Double(max(0.5, fx.tranceGateSmoothingMs))
+        slew = Float(1.0 - exp(-1.0 / (ms * 0.001 * sampleRate)))
+        stereoOffset = fx.tranceGateStereoOffset
+    }
+}
 
 #endif  // !os(watchOS)

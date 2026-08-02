@@ -36,8 +36,16 @@ public final class ConvolutionReverb: PureStage {
     public static let maxDecaySeconds = 30.0
 
     private let sampleRate: Double
-    private let wet: Float
-    private let dry: Float
+    /// Wet level, slewed toward `targetWet` as frames are EMITTED (up to one
+    /// block behind the input — inaudible at 30 ms scale). Dry is derived
+    /// from wet each frame so the pair always sums to unity mid-glide. The
+    /// mix is the only continuous parameter here; everything else shapes the
+    /// impulse response and is structural.
+    private var wet: Float
+    private var dry: Float
+    private var targetWet: Float
+    /// One-pole coefficient for the ~30 ms mix slew.
+    private let paramSlew: Float
     private let mixLane: AutomationLane?
     private let totalFrames: Int?
     private let irFrames: Int
@@ -49,15 +57,24 @@ public final class ConvolutionReverb: PureStage {
     private var bufferedL: [Float] = []
     private var bufferedR: [Float] = []
     /// Dry frames received but not yet emitted (waiting for their wet).
+    /// `dryHead` indexes the first unconsumed frame — consumed prefixes are
+    /// skipped by index and compacted OUTSIDE the per-frame path, because
+    /// `removeFirst` per block was measurable allocation/memmove churn on
+    /// the render thread.
     private var dryPendingL: [Float] = []
     private var dryPendingR: [Float] = []
-    /// Wet frames from completed blocks, not yet emitted. `wetBase` is the
-    /// absolute frame index of `wetL[0]` — consumed prefixes are trimmed so
-    /// memory stays bounded regardless of stream length.
+    private var dryHead = 0
+    /// Wet frames from completed blocks, not yet emitted. `wetHead` indexes
+    /// the first live frame (same compaction scheme as `dryHead`); `wetBase`
+    /// is the absolute frame index of `wetL[wetHead]`. Memory stays bounded
+    /// regardless of stream length.
     private var wetL: [Float] = []
     private var wetR: [Float] = []
+    private var wetHead = 0
     private var wetBase = 0
     private var emitted = 0
+    /// Compact a consumed prefix once it exceeds this many frames.
+    private let compactThreshold = 1 << 16
 
     /// Creates a convolution reverb over a **custom impulse response** —
     /// any recorded or designed space (a stairwell clap, a spring tank, a
@@ -79,6 +96,9 @@ public final class ConvolutionReverb: PureStage {
         let m = min(max(mix, 0), 100) / 100
         self.wet = m
         self.dry = 1 - m
+        self.targetWet = m
+        // One-pole reaching ~63 % of a step in 30 ms.
+        self.paramSlew = Float(1 - exp(-1 / (0.03 * sampleRate)))
         self.mixLane = mixLane
         self.totalFrames = totalFrames
         let cap = Int(sampleRate * 60)
@@ -110,6 +130,9 @@ public final class ConvolutionReverb: PureStage {
         let m = min(max(mix, 0), 100) / 100
         self.wet = m
         self.dry = 1 - m
+        self.targetWet = m
+        // One-pole reaching ~63 % of a step in 30 ms.
+        self.paramSlew = Float(1 - exp(-1 / (0.03 * sampleRate)))
         self.mixLane = mixLane
         self.totalFrames = totalFrames
 
@@ -262,27 +285,60 @@ public final class ConvolutionReverb: PureStage {
     private func emitFrames(_ count: Int) -> (l: [Float], r: [Float]) {
         var outL = [Float](repeating: 0, count: count)
         var outR = [Float](repeating: 0, count: count)
-        for i in 0..<count {
-            let frame = emitted + i
-            var w = wet
-            var d = dry
-            if let lane = mixLane, let total = totalFrames, total > 1 {
-                let v = Float(lane.value(at: Double(min(frame, total - 1)) / Double(total - 1)))
-                w = min(max(v, 0), 1)
-                d = 1 - w
+        var wet = self.wet
+        let targetWet = self.targetWet, paramSlew = self.paramSlew
+        let dryHead = self.dryHead
+        let wetOffset = wetHead + (emitted - wetBase)
+        dryPendingL.withUnsafeBufferPointer { dpL in
+        dryPendingR.withUnsafeBufferPointer { dpR in
+        wetL.withUnsafeBufferPointer { wpL in
+        wetR.withUnsafeBufferPointer { wpR in
+        outL.withUnsafeMutableBufferPointer { oL in
+        outR.withUnsafeMutableBufferPointer { oR in
+            for i in 0..<count {
+                // Chase the retune target (a no-op once settled). When a
+                // lane is bound it overrides per frame below, but the base
+                // still follows so a lane-less rebuild lands on the same
+                // value.
+                wet += (targetWet - wet) * paramSlew
+                var w = wet
+                var d = 1 - wet
+                if let lane = mixLane, let total = totalFrames, total > 1 {
+                    let frame = emitted + i
+                    let v = Float(lane.value(at: Double(min(frame, total - 1)) / Double(total - 1)))
+                    w = min(max(v, 0), 1)
+                    d = 1 - w
+                }
+                oL[i] = dpL[dryHead + i] * d + wpL[wetOffset + i] * w
+                oR[i] = dpR[dryHead + i] * d + wpR[wetOffset + i] * w
             }
-            let idx = frame - wetBase
-            outL[i] = dryPendingL[i] * d + wetL[idx] * w
-            outR[i] = dryPendingR[i] * d + wetR[idx] * w
+        }}}}}}
+        self.wet = wet
+        self.dry = 1 - wet
+        self.dryHead += count
+        if self.dryHead == dryPendingL.count {
+            dryPendingL.removeAll(keepingCapacity: true)
+            dryPendingR.removeAll(keepingCapacity: true)
+            self.dryHead = 0
+        } else if self.dryHead >= compactThreshold {
+            dryPendingL.removeFirst(self.dryHead)
+            dryPendingR.removeFirst(self.dryHead)
+            self.dryHead = 0
         }
-        dryPendingL.removeFirst(count)
-        dryPendingR.removeFirst(count)
         emitted += count
-        let drop = min(emitted - wetBase, wetL.count)
+        let drop = min(emitted - wetBase, wetL.count - wetHead)
         if drop > 0 {
-            wetL.removeFirst(drop)
-            wetR.removeFirst(drop)
+            wetHead += drop
             wetBase += drop
+            if wetHead == wetL.count {
+                wetL.removeAll(keepingCapacity: true)
+                wetR.removeAll(keepingCapacity: true)
+                wetHead = 0
+            } else if wetHead >= compactThreshold {
+                wetL.removeFirst(wetHead)
+                wetR.removeFirst(wetHead)
+                wetHead = 0
+            }
         }
         return (outL, outR)
     }
@@ -299,16 +355,34 @@ public final class ConvolutionReverb: PureStage {
         dryPendingL.append(contentsOf: l[0..<n])
         dryPendingR.append(contentsOf: r[0..<n])
 
-        // Convolve every full block that's ready.
-        while bufferedL.count >= blockSize {
-            wetL.append(contentsOf: convL.processBlock(Array(bufferedL[0..<blockSize])))
-            wetR.append(contentsOf: convR.processBlock(Array(bufferedR[0..<blockSize])))
-            bufferedL.removeFirst(blockSize)
-            bufferedR.removeFirst(blockSize)
+        // Convolve every full block that's ready — fed straight from the
+        // buffer by pointer, with ONE compaction after the loop instead of
+        // an Array copy plus removeFirst per block.
+        var consumed = 0
+        while bufferedL.count - consumed >= blockSize {
+            let start = consumed
+            let outBlockL = bufferedL.withUnsafeBufferPointer {
+                convL.processBlock(UnsafeBufferPointer(rebasing: $0[start..<start + blockSize]))
+            }
+            let outBlockR = bufferedR.withUnsafeBufferPointer {
+                convR.processBlock(UnsafeBufferPointer(rebasing: $0[start..<start + blockSize]))
+            }
+            wetL.append(contentsOf: outBlockL)
+            wetR.append(contentsOf: outBlockR)
+            consumed += blockSize
+        }
+        if consumed > 0 {
+            if consumed == bufferedL.count {
+                bufferedL.removeAll(keepingCapacity: true)
+                bufferedR.removeAll(keepingCapacity: true)
+            } else {
+                bufferedL.removeFirst(consumed)
+                bufferedR.removeFirst(consumed)
+            }
         }
 
         // Emit everything whose wet is final.
-        let available = (wetBase + wetL.count) - emitted
+        let available = (wetBase + wetL.count - wetHead) - emitted
         guard available > 0 else { return (l: [], r: []) }
         return emitFrames(available)
     }
@@ -317,9 +391,9 @@ public final class ConvolutionReverb: PureStage {
     /// ring-out. Call once, after the last ``process(l:r:)``.
     public func tail() -> (l: [Float], r: [Float]) {
         guard let convL, let convR else { return ([], []) }
-        let remainder = dryPendingL.count
+        let remainder = dryPendingL.count - dryHead
         let target = emitted + remainder + irFrames
-        while wetBase + wetL.count < target {
+        while wetBase + (wetL.count - wetHead) < target {
             var blockL = bufferedL
             var blockR = bufferedR
             bufferedL.removeAll(keepingCapacity: true)
@@ -342,14 +416,23 @@ public final class ConvolutionReverb: PureStage {
         var ringL = [Float](repeating: 0, count: irFrames)
         var ringR = [Float](repeating: 0, count: irFrames)
         for i in 0..<irFrames {
-            let idx = emitted + i - wetBase
-            if idx >= 0 && idx < wetL.count {
+            let idx = wetHead + (emitted + i - wetBase)
+            if idx >= wetHead && idx < wetL.count {
                 ringL[i] = wetL[idx] * w
                 ringR[i] = wetR[idx] * w
             }
         }
         emitted = target
         return (l: head.l + ringL, r: head.r + ringR)
+    }
+
+    /// Retunes the wet/dry mix in place — the ONLY continuous parameter.
+    /// Profile, decay and a custom impulse all rebuild the convolver's
+    /// partitions and must go through a stage rebuild instead. Runs on the
+    /// audio thread — plain stored writes only. Clamp matches the
+    /// initialisers'.
+    func update(from fx: EffectsParameters) {
+        targetWet = min(max(fx.convolutionReverbMix, 0), 100) / 100
     }
 }
 

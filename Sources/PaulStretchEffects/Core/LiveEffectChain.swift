@@ -64,6 +64,17 @@ public final class LiveEffectChain {
     /// A replacement published by ``setEffects(_:)``, consumed by the next
     /// render. Guarded by ``lock``.
     private var pendingStages: [PureStage]?
+    /// New continuous parameter values published by ``updateParameters(_:)``,
+    /// applied to the LIVE stages by the next render without rebuilding them.
+    /// Guarded by ``lock``.
+    private var pendingParams: EffectsParameters?
+    /// The chain (and any consumed parameter struct) the render callback just
+    /// swapped OUT. Freed by the next writer-thread call, never by the render
+    /// callback: a convolver holds megabytes of partition spectra and an FFT
+    /// setup, and `free` can take a lock — releasing the outgoing chain inside
+    /// the callback was an audio-thread hazard. Guarded by ``lock``.
+    private var retiredStages: [PureStage]?
+    private var retiredParams: EffectsParameters?
     private var lock = os_unfair_lock()
 
     /// Finished audio waiting to be served, absorbing the mismatch between
@@ -74,6 +85,26 @@ public final class LiveEffectChain {
     /// `true` when no stage is active, so the host can skip the node.
     public private(set) var isEmpty: Bool
 
+    /// Frames of latency the chain's queueing introduces, for the host to
+    /// report (see `LiveEffectAudioUnit.latency`).
+    ///
+    /// Only the convolver withholds audio: it buffers input until it has a
+    /// full FFT partition, so a chain containing one runs up to a block
+    /// late and the queue below serves silence while it fills. Every other
+    /// stage returns frame for frame. The value is conservative (the worst
+    /// case; the true lag is `block - queued` and varies with the quantum),
+    /// which is the right direction for a host aligning layers.
+    ///
+    /// Must match `ConvolutionReverb.blockSize`, which is private — if that
+    /// block size ever changes, change this with it.
+    public private(set) var latencyFrames: Int
+
+    private static let convolverBlockSize = 4096
+
+    private static func latency(of stages: [PureStage]) -> Int {
+        stages.contains { $0 is ConvolutionReverb } ? convolverBlockSize : 0
+    }
+
     /// Creates a live chain for `effects`.
     ///
     /// - Parameters:
@@ -83,8 +114,10 @@ public final class LiveEffectChain {
         self.sampleRate = sampleRate
         // `totalFrames: nil` — automation lanes are a render-length concept
         // and there is no known length when playing live.
-        self.stages = makePureStages(sampleRate: sampleRate, effects: effects, totalFrames: nil)
-        self.isEmpty = stages.isEmpty
+        let built = makePureStages(sampleRate: sampleRate, effects: effects, totalFrames: nil)
+        self.stages = built
+        self.isEmpty = built.isEmpty
+        self.latencyFrames = LiveEffectChain.latency(of: built)
     }
 
     /// Publishes new settings. Safe to call from the main thread while audio
@@ -98,9 +131,49 @@ public final class LiveEffectChain {
     public func setEffects(_ fx: EffectsParameters) {
         let built = makePureStages(sampleRate: sampleRate, effects: fx, totalFrames: nil)
         os_unfair_lock_lock(&lock)
+        let trash = retiredStages
+        let trashParams = retiredParams
+        retiredStages = nil
+        retiredParams = nil
         pendingStages = built
+        pendingParams = nil
         os_unfair_lock_unlock(&lock)
+        // The chain the render callback swapped out dies HERE, on the calling
+        // thread — see `retiredStages`.
+        _ = trash
+        _ = trashParams
         isEmpty = built.isEmpty
+        // Reported, not applied: the AU reads this when its render
+        // resources are (re)allocated, so a swap that adds or removes the
+        // convolver mid-render is not reflected until the engine restarts.
+        latencyFrames = LiveEffectChain.latency(of: built)
+    }
+
+    /// Publishes new continuous parameter values for the RUNNING stages.
+    ///
+    /// Unlike ``setEffects(_:)`` this does not rebuild anything: each live
+    /// stage retunes in place, keeping its delay lines and tails. The pure-DSP
+    /// stages had no path like this at all, so an automated shimmer mix or a
+    /// dragged pitch knob rebuilt the whole chain — tails truncated, convolver
+    /// partitions recomputed, thirty times a second under automation.
+    ///
+    /// Only continuous parameters take effect; if a STRUCTURAL setting changed
+    /// (compare ``EffectsParameters/pureDSPStructureSignature``), call
+    /// ``setEffects(_:)`` instead.
+    ///
+    /// - Parameter fx: The settings to retune to.
+    public func updateParameters(_ fx: EffectsParameters) {
+        os_unfair_lock_lock(&lock)
+        let trash = retiredStages
+        let trashParams = retiredParams
+        retiredStages = nil
+        retiredParams = nil
+        // A pending rebuild supersedes a retune — the freshly built stages
+        // were made from at-least-as-new settings.
+        if pendingStages == nil { pendingParams = fx }
+        os_unfair_lock_unlock(&lock)
+        _ = trash
+        _ = trashParams
     }
 
     /// Processes one quantum in place. **Audio thread only.**
@@ -110,12 +183,34 @@ public final class LiveEffectChain {
     ///   - r: Right channel, modified in place.
     public func render(l: inout [Float], r: inout [Float]) {
         // Non-blocking pickup: if the writer holds the lock we keep the
-        // current chain and try again next quantum.
+        // current chain and try again next quantum. Whatever gets swapped out
+        // parks in the retired slots for the writer thread to free — nothing
+        // is deallocated here.
         if os_unfair_lock_trylock(&lock) {
-            if let p = pendingStages { stages = p; pendingStages = nil }
+            if let p = pendingStages {
+                retiredStages = stages
+                stages = p
+                pendingStages = nil
+            } else if let fx = pendingParams {
+                for stage in stages { stage.update(from: fx) }
+                retiredParams = pendingParams
+                pendingParams = nil
+            }
             os_unfair_lock_unlock(&lock)
         }
         guard !stages.isEmpty else { return }
+
+        // Scrub non-finite input before it reaches any stage. A single NaN
+        // or Inf sample latches every piece of recirculating state it
+        // touches — the shimmer tank, the SVF integrators, the convolver's
+        // frequency-domain delay line — into permanent NaN until the chain
+        // is rebuilt, so one upstream glitch silences the effect forever.
+        // Cost: one `isFinite` test per sample over two arrays (~1k
+        // compares per 512-frame quantum), no allocation — noise next to
+        // the stages themselves, and cheap insurance against a poisoned
+        // chain.
+        for i in 0..<l.count where !l[i].isFinite { l[i] = 0 }
+        for i in 0..<r.count where !r[i].isFinite { r[i] = 0 }
 
         var cl = l, cr = r
         for stage in stages {

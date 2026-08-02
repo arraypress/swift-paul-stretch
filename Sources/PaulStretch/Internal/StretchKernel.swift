@@ -118,15 +118,15 @@ extension StretchKernel {
     ///   - by: Length multiplier. `0.5` halves the length and raises pitch an
     ///     octave; `2` doubles it and drops an octave.
     /// - Returns: The resampled audio, at the same sample rate.
-    static func resampled(_ input: StereoBuffer, by by: Double) -> StereoBuffer {
+    static func resampled(_ input: StereoBuffer, by factor: Double) -> StereoBuffer {
         let n = input.frameCount
-        guard n > 3, by > 0, abs(by - 1) > 0.0001 else { return input }
-        let outCount = max(4, Int((Double(n) * by).rounded()))
+        guard n > 3, factor > 0, abs(factor - 1) > 0.0001 else { return input }
+        let outCount = max(4, Int((Double(n) * factor).rounded()))
 
         /// A moving average wide enough to cover the new sample spacing.
         func prefiltered(_ x: [Float]) -> [Float] {
-            guard by < 1 else { return x }
-            let width = max(2, Int((1 / by).rounded()))
+            guard factor < 1 else { return x }
+            let width = max(2, Int((1 / factor).rounded()))
             guard width > 1 else { return x }
             var out = [Float](repeating: 0, count: x.count)
             var running: Float = 0
@@ -327,16 +327,32 @@ struct StretchKernel {
         //
         // Hann^2 = 0.375 - 0.5cos(t) + 0.125cos(2t). At a hop of N/4 the four
         // overlapping copies put the cos(t) terms 90 degrees apart and the
-        // cos(2t) terms 180 degrees apart, so both cancel and the sum is a flat
-        // 1.5. The choice is therefore equivalent in the property that matters.
+        // cos(2t) terms 180 degrees apart, so both cancel and the sum is flat.
+        //
+        // That exact cancellation holds for the PERIODIC Hann (denominator
+        // `windowSize`). What is built below is the SYMMETRIC form
+        // (denominator `windowSize - 1`), whose period is one sample longer
+        // than the hop grid assumes, so the squared-window sum is only
+        // near-constant: the residual ripple is O(1/N) — about -80 dB at
+        // N = 8192 — inaudible and further hidden by the peak-normalise
+        // pass. It stays symmetric ON PURPOSE: switching to the periodic
+        // form would change every sample of every seeded render and
+        // invalidate the golden tests for a difference nobody can hear.
         var hann = [Float](repeating: 0, count: windowSize)
         for i in 0..<windowSize {
             hann[i] = Float(0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(windowSize - 1)))
         }
         self.hann = hann
 
+        // The onset curve is indexed with `inputStart` (see renderRange),
+        // which is a position in the RESAMPLED source — when pitchSemitones
+        // is non-zero the resample changes the length, so a curve computed
+        // from the ORIGINAL input would place onset protection at times off
+        // by the pitch factor. Detect onsets in `source`, the buffer the
+        // analysis windows actually read; with no pitch shift `source` IS
+        // `input`, so the drift-free case is unchanged.
         self.onsetCurve = self.onsetSensitivity > 0
-            ? computeOnsetCurve(input.l, input.r, onsetFrameSize) : nil
+            ? computeOnsetCurve(source.l, source.r, onsetFrameSize) : nil
     }
 
     /// Renders output frames `[rangeStart, rangeEnd)` into local buffers
@@ -392,7 +408,14 @@ struct StretchKernel {
 
                 if wrapInput {
                     for i in 0..<windowSize {
-                        let idx = (inputStart + i) % inputLen
+                        // Floor-mod, not `%`: `readPosition` can return a
+                        // NEGATIVE frame when spectralDrift > 0 (the sinusoid
+                        // offset can exceed the linear position early in the
+                        // render), and Swift's `%` preserves the dividend's
+                        // sign — a negative index into an UnsafePointer is an
+                        // out-of-bounds read. Identical to `%` for the
+                        // non-negative positions every drift-free render uses.
+                        let idx = ((inputStart + i) % inputLen + inputLen) % inputLen
                         let ww = win[i]
                         realL[i] = inLp[idx] * ww; realR[i] = inRp[idx] * ww
                         imagL[i] = 0; imagR[i] = 0

@@ -22,9 +22,16 @@ import PaulStretch
 /// full-scale drones can't fizz on the up-swing.
 public final class BreathingPump: PureStage {
 
-    private let depth: Double
-    private let rateHz: Double
+    /// Swell depth, slewed toward `targetDepth` — it scales the gain swing
+    /// directly, so a stepped knob move would otherwise zipper.
+    private var depth: Double
+    private var targetDepth: Double
+    /// Applied instantly on retune: the phases accumulate incrementally, so
+    /// a new rate only changes the increment — phase-continuous.
+    private var rateHz: Double
     private let sampleRate: Double
+    /// One-pole coefficient for the ~30 ms parameter slew.
+    private let paramSlew: Double
     private let depthLane: AutomationLane?
     private let rateLane: AutomationLane?
     private let totalFrames: Int?
@@ -52,8 +59,12 @@ public final class BreathingPump: PureStage {
                 rateLane: AutomationLane? = nil,
                 totalFrames: Int? = nil) {
         self.sampleRate = sampleRate
-        self.depth = Double(min(max(depth, 0), 1))
+        let d = Double(min(max(depth, 0), 1))
+        self.depth = d
+        self.targetDepth = d
         self.rateHz = Double(min(max(rateHz, 0.02), 14))
+        // One-pole reaching ~63 % of a step in 30 ms.
+        self.paramSlew = 1 - exp(-1 / (0.03 * sampleRate))
         self.depthLane = depthLane
         self.rateLane = rateLane
         self.totalFrames = totalFrames
@@ -61,14 +72,17 @@ public final class BreathingPump: PureStage {
 
     public func process(l: [Float], r: [Float]) -> (l: [Float], r: [Float]) {
         let n = min(l.count, r.count)
-        if depth <= 0 && depthLane == nil { return (l: l, r: r) }
+        // Identity bypass is safe here (unlike wow, there is no buffer to
+        // keep fed): the phases simply stand still until a retune arrives.
+        if depth <= 0 && targetDepth <= 0 && depthLane == nil { return (l: l, r: r) }
         var outL = [Float](repeating: 0, count: n)
         var outR = [Float](repeating: 0, count: n)
         let twoPiOverSr = 2 * Double.pi / sampleRate
-        let baseDepth = depth > 0 ? 0.25 * depth : 0.25
 
         for i in 0..<n {
             let frame = position + i
+            depth += (targetDepth - depth) * paramSlew
+            let baseDepth = depth > 0 ? 0.25 * depth : 0.25
             let hz: Double
             if let lane = rateLane, let total = totalFrames, total > 1 {
                 hz = 0.02 + lane.value(at: Double(frame) / Double(total - 1)) * 0.48
@@ -92,6 +106,15 @@ public final class BreathingPump: PureStage {
     }
 
     public func tail() -> (l: [Float], r: [Float]) { ([], []) }
+
+    /// Retunes depth and rate in place. Depth is a target the per-sample slew
+    /// chases; rate lands instantly because the phases are integrated. Runs
+    /// on the audio thread — plain stored writes only. Clamps match the
+    /// initialiser's.
+    func update(from fx: EffectsParameters) {
+        targetDepth = Double(min(max(fx.pumpDepth, 0), 1))
+        rateHz = Double(min(max(fx.pumpRateHz, 0.02), 14))
+    }
 
     /// Identity below ±0.9; the overshoot is folded through a tanh that
     /// asymptotes at ±1.0. Bit-transparent for everything under the knee.

@@ -43,13 +43,17 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
     /// Whether the EQ is active.
     public var eqEnabled = false
 
-    /// Low-shelf gain at 120 Hz, in decibels.
     /// The parametric EQ bands, low to high.
     ///
     /// A high-pass, two shelves, three bells and a low-pass. Every band
     /// starts disabled and flat, so enabling the EQ is silent until a band
     /// is dialled in.
     public var eqBands: [EQBand] = EQBand.defaultBands
+
+    /// Output make-up gain after the bands, in decibels (`-24…24`) —
+    /// `AVAudioUnitEQ.globalGain`, which went unset (and unexposed) for as
+    /// long as the bands existed. A big cut wants its level back.
+    public var eqGlobalGain: Float = 0
 
 
     // MARK: Resonant low-pass filter
@@ -255,7 +259,12 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
 
     /// Wet blend (`0…100`). Below 100 the dry signal remains, so a shifted
     /// voice is an INTERVAL rather than a transposition.
-    public var pitchMix: Float = 50
+    ///
+    /// Defaults to 100: a pitch *shifter* that transposes is what people
+    /// reach for; the 50 it used to default to meant every fresh instance
+    /// played the interval against the dry signal and read as weak. Saved
+    /// documents keep whatever they stored.
+    public var pitchMix: Float = 100
 
     // MARK: Tape wow & flutter
 
@@ -503,15 +512,20 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
 
     /// `true` when any of the library's own pure-DSP stages is enabled
     /// (shimmer, convolution reverb, sweep filter, trance gate, wow, pump,
-    /// auto-pan, placement).
+    /// auto-pan, placement, pitch).
     ///
     /// These run live via ``LiveEffectChain`` when the host installs a
     /// ``LiveEffectNode``, and are baked into the buffer otherwise; export
     /// always bakes them.
+    ///
+    /// Every stage ``makePureStages`` can build must be listed here: a host
+    /// that gates node installation on this flag silently drops any stage
+    /// this misses — pitch was once absent, and a pitch-only layer previewed
+    /// shifted but exported dry.
     public var isPureDSPEnabled: Bool {
         shimmerEnabled || convolutionReverbEnabled || sweepFilterEnabled
             || wowEnabled || pumpEnabled || autoPanEnabled
-            || tranceGateEnabled || placementEnabled
+            || tranceGateEnabled || placementEnabled || pitchEnabled
     }
 
     /// `true` when at least one effect is enabled — baking with everything
@@ -522,7 +536,8 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
 
     /// A cache key over exactly the settings that change the *baked*
     /// pure-DSP output — shimmer, convolution reverb (including a custom
-    /// impulse), sweep filter, wow, pump, auto-pan and the automation lanes.
+    /// impulse), sweep filter, wow, pump, auto-pan, gate, placement, pitch,
+    /// the stage order and the automation lanes.
     ///
     /// Hosts that bake the pure-DSP stages into a playback buffer should
     /// re-bake when (and only when) this string changes; live stock-chain
@@ -543,6 +558,40 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         s += "|\(tranceGateEnabled),\(tranceGateRateHz),\(tranceGateDepth),\(tranceGateSmoothingMs),\(tranceGateStereoOffset)"
         s += "," + tranceGatePattern.map { $0 ? "1" : "0" }.joined()
         s += "|\(placementEnabled),\(placementPan),\(placementWidth)"
+        s += "|\(pitchEnabled),\(pitchSemitones),\(pitchCents),\(pitchSpread),\(pitchVoices),\(pitchMix)"
+        s += "|" + pureOrder.map(\.rawValue).joined(separator: ",")
+        if !parameterLanes.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            if let data = try? encoder.encode(parameterLanes) {
+                s += "|" + String(decoding: data, as: UTF8.self)
+            }
+        }
+        return s
+    }
+
+    /// A cache key over only the settings that change the pure-DSP chain's
+    /// STRUCTURE — which stages exist, in what order, and anything that sizes
+    /// their state (voice counts, the climb delay line, convolver partitions,
+    /// the gate's step pattern, bound lanes).
+    ///
+    /// The split exists so a host can choose the cheap path: when this string
+    /// is unchanged but ``pureDSPSignature`` moved, only continuous values
+    /// changed and ``LiveEffectChain/updateParameters(_:)`` retunes the live
+    /// stages in place — tails intact. When THIS string changes, the chain
+    /// must be rebuilt with ``LiveEffectChain/setEffects(_:)``.
+    public var pureDSPStructureSignature: String {
+        var s = "\(shimmerEnabled),\(shimmerClimbSeconds)"
+        s += "|\(convolutionReverbEnabled),\(convolutionReverbProfile.rawValue),\(convolutionReverbDecaySeconds)"
+        s += ",\(convolutionReverbCustomIRData?.count ?? -1),\(convolutionReverbCustomIRData?.hashValue ?? 0)"
+        s += "|\(sweepFilterEnabled)"
+        s += "|\(wowEnabled)"
+        s += "|\(pumpEnabled)"
+        s += "|\(autoPanEnabled)"
+        s += "|\(tranceGateEnabled)," + tranceGatePattern.map { $0 ? "1" : "0" }.joined()
+        s += "|\(placementEnabled)"
+        s += "|\(pitchEnabled),\(pitchVoices)"
+        s += "|" + pureOrder.map(\.rawValue).joined(separator: ",")
         if !parameterLanes.isEmpty {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
@@ -560,7 +609,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case reverbEnabled, reverbPreset, reverbMix
-        case eqEnabled, eqBands
+        case eqEnabled, eqBands, eqGlobalGain
         case filterEnabled, filterCutoff, filterResonance
         case delayEnabled, delayTime, delayFeedback, delayMix, delayLowPassCutoff
         case distortionEnabled, distortionPreset, distortionPreGain, distortionMix
@@ -598,6 +647,7 @@ public struct EffectsParameters: Sendable, Equatable, Codable {
         reverbMix = try c.decodeIfPresent(Float.self, forKey: .reverbMix) ?? reverbMix
         eqEnabled = try c.decodeIfPresent(Bool.self, forKey: .eqEnabled) ?? eqEnabled
         eqBands = try c.decodeIfPresent([EQBand].self, forKey: .eqBands) ?? eqBands
+        eqGlobalGain = try c.decodeIfPresent(Float.self, forKey: .eqGlobalGain) ?? eqGlobalGain
         filterEnabled = try c.decodeIfPresent(Bool.self, forKey: .filterEnabled) ?? filterEnabled
         filterCutoff = try c.decodeIfPresent(Float.self, forKey: .filterCutoff) ?? filterCutoff
         filterResonance = try c.decodeIfPresent(Float.self, forKey: .filterResonance) ?? filterResonance

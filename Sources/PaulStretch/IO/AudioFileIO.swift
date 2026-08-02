@@ -59,7 +59,12 @@ public enum AudioFileIO {
         var fed = false
         var convErr: NSError?
         converter.convert(to: dstBuf, error: &convErr) { _, outStatus in
-            if fed { outStatus.pointee = .noDataNow; return nil }
+            // `.endOfStream` once drained, not `.noDataNow`: noDataNow means
+            // "more later", so the converter never flushed its sample-rate
+            // filter tail and every resampled decode was truncated by the
+            // filter's group delay (sub-millisecond, but real frames).
+            // endOfStream makes it emit that tail.
+            if fed { outStatus.pointee = .endOfStream; return nil }
             fed = true
             outStatus.pointee = .haveData
             return srcBuf
@@ -116,8 +121,12 @@ public enum AudioFileIO {
     ///   - sampleRate: The sample rate to decode/resample to, in hertz.
     /// - Returns: The decoded audio, or `nil` when the bytes don't decode.
     public static func decodeStereo(_ data: Data, sampleRate: Double) -> StereoBuffer? {
+        // UUID, not `data.hashValue`: hashValue is process-seeded (not a
+        // stable content key) and two concurrent decodes of equal bytes
+        // would share one path — one deletes the file while the other is
+        // still reading it. A unique name per call cannot collide.
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ps-embedded-\(data.hashValue).audio")
+            .appendingPathComponent("ps-embedded-\(UUID().uuidString).audio")
         do {
             try data.write(to: url)
             defer { try? FileManager.default.removeItem(at: url) }

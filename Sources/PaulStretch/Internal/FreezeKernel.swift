@@ -86,6 +86,11 @@ struct FreezeKernel {
         self.inR = input.r
         self.inputLen = inputLen
 
+        // SYMMETRIC Hann (denominator windowSize - 1): only the PERIODIC
+        // form (/windowSize) sums exactly flat when squared at hop N/4; this
+        // one leaves O(1/N) ripple (~-80 dB at N = 8192), inaudible and
+        // hidden by peak-normalise. Kept symmetric because changing it would
+        // invalidate every seeded render — see the note in StretchKernel.
         var hann = [Float](repeating: 0, count: windowSize)
         for i in 0..<windowSize {
             hann[i] = Float(0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(windowSize - 1)))

@@ -10,6 +10,7 @@
 //
 
 import AVFoundation
+import os.lock
 
 /// Errors thrown by ``StretchSourceNode/prepare(source:parameters:seed:bufferSeconds:)``.
 public enum StretchSourceNodeError: Error, Sendable {
@@ -83,12 +84,57 @@ public final class StretchSourceNode {
     }
 
     /// Shared with the producer thread and the render callback.
+    ///
+    /// The flags and the underrun counter cross three threads (main,
+    /// producer, audio) and used to be plain `var`s — a data race, and UB
+    /// that TSan flags. They are guarded by one `os_unfair_lock` now
+    /// (`OSAllocatedUnfairLock` needs macOS 13 / iOS 16; this package's
+    /// floor is macOS 10.15 / iOS 13, and it has no dependencies to lean
+    /// on for atomics). The discipline that keeps the audio thread safe:
+    ///
+    /// - Non-render paths (main thread, producer thread) lock normally.
+    /// - The render callback's ONLY touch is ``noteUnderrun(frames:)``,
+    ///   which uses `os_unfair_lock_trylock` and simply skips the update
+    ///   when contended — the audio thread never blocks. The cost is that
+    ///   a diagnostic counter can undercount during the (rare) instant a
+    ///   non-render thread holds the lock, which is acceptable; a blocked
+    ///   render callback is a dropout, which is not.
     private final class State {
         let ring: AudioRingBuffer
-        var producerDone = false
-        var stopped = false
-        var underrunFrames = 0
+        private var lock = os_unfair_lock()
+        private var _producerDone = false
+        private var _stopped = false
+        private var _underrunFrames = 0
+
         init(ring: AudioRingBuffer) { self.ring = ring }
+
+        /// Set by the producer thread when it exits; read by the main
+        /// thread (`isFinished`). Never touched on the render thread —
+        /// the render-side read lives inside ``noteUnderrun(frames:)``.
+        var producerDone: Bool {
+            get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _producerDone }
+            set { os_unfair_lock_lock(&lock); _producerDone = newValue; os_unfair_lock_unlock(&lock) }
+        }
+
+        /// Written by `stop()` (main thread), polled by the producer thread.
+        var stopped: Bool {
+            get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _stopped }
+            set { os_unfair_lock_lock(&lock); _stopped = newValue; os_unfair_lock_unlock(&lock) }
+        }
+
+        /// Read by the main thread (`underrunFrames`).
+        var underrunFrames: Int {
+            os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _underrunFrames
+        }
+
+        /// Render-callback path: records a shortfall without ever blocking.
+        /// If the lock is contended the count for this quantum is dropped —
+        /// see the class note for why that trade is right.
+        func noteUnderrun(frames: Int) {
+            guard os_unfair_lock_trylock(&lock) else { return }
+            if !_producerDone { _underrunFrames += frames }
+            os_unfair_lock_unlock(&lock)
+        }
     }
 
     private let state: State
@@ -153,7 +199,8 @@ public final class StretchSourceNode {
             if got < frames {
                 // Zero-fill the shortfall; never block the audio thread.
                 for i in got..<frames { outL[i] = 0; outR[i] = 0 }
-                if !state.producerDone { state.underrunFrames += frames - got }
+                // Try-lock inside; skips the count rather than blocking.
+                state.noteUnderrun(frames: frames - got)
             }
             return noErr
         }

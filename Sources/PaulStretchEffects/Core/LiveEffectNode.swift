@@ -49,6 +49,38 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
     /// The DSP. Set before the engine starts; read on the audio thread.
     public var chain: LiveEffectChain?
 
+    /// The latency reported to the host, in seconds. Captured from the
+    /// chain when render resources are allocated — see `latency`.
+    private var reportedLatency: TimeInterval = 0
+
+    /// The processing latency the chain introduces.
+    ///
+    /// A chain containing the convolver withholds up to one 4096-frame
+    /// block (~93 ms at 44.1 kHz) — without reporting it, a host has no way
+    /// to know a "Space" path runs late relative to its sample-locked
+    /// siblings, and no way to compensate.
+    ///
+    /// Two fixes were considered; this one is the one that cannot move
+    /// audio:
+    ///
+    /// - **Report the latency** (done here). Metadata only — no sample is
+    ///   delayed or advanced, so nothing can desynchronise that wasn't
+    ///   already; the host gains the number it needs to delay-compensate
+    ///   sibling paths.
+    /// - **Prime every chain's queue with one block of zeros** so latency
+    ///   is uniform. Rejected: it ADDS ~93 ms to chains that had none, and
+    ///   still cannot equalise against layers with no LiveEffectNode at all
+    ///   (hosts skip the node for an empty rack) — it actively shifts
+    ///   timing between layers, which is the exact defect being fixed.
+    ///
+    /// Limitation, by construction: the value is captured at
+    /// `allocateRenderResources`. A chain swap that adds or removes the
+    /// convolver mid-render (`LiveEffectChain.setEffects`) cannot update it
+    /// — `latency` must not change while rendering — so it refreshes when
+    /// the host next restarts/reallocates (which hosts that rewire a
+    /// running graph must do anyway).
+    public override var latency: TimeInterval { reportedLatency }
+
     /// Creates the unit with a stereo 44.1 kHz default format.
     ///
     /// The engine re-negotiates the bus format on connection, so this is
@@ -76,6 +108,11 @@ public final class LiveEffectAudioUnit: AUAudioUnit {
 
     /// Preallocates the render scratch, so the audio thread never has to.
     public override func allocateRenderResources() throws {
+        // Capture the chain's queue latency BEFORE resources go live, so a
+        // host querying `latency` after allocation sees the truth for the
+        // chain it is about to render.
+        let sr = outBus.format.sampleRate
+        reportedLatency = sr > 0 ? Double(chain?.latencyFrames ?? 0) / sr : 0
         try super.allocateRenderResources()
         let n = Int(maximumFramesToRender)
         workL = [Float](repeating: 0, count: n)

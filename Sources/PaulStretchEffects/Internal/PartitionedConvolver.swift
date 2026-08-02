@@ -104,21 +104,34 @@ final class PartitionedConvolver {
     /// Convolves the next block. `input` must hold exactly `blockSize`
     /// frames (zero-pad the final one); returns `blockSize` frames.
     func processBlock(_ input: [Float]) -> [Float] {
+        input.withUnsafeBufferPointer { processBlock($0) }
+    }
+
+    /// Pointer-based variant so callers can feed a slice of their own
+    /// buffer without materialising a fresh `Array` per block.
+    func processBlock(_ input: UnsafeBufferPointer<Float>) -> [Float] {
         let partitions = irRe.count
         // Push the new input spectrum into the delay line.
-        for i in 0..<blockSize { re[i] = input[i]; im[i] = 0 }
-        for i in blockSize..<fftSize { re[i] = 0; im[i] = 0 }
         re.withUnsafeMutableBufferPointer { rp in
             im.withUnsafeMutableBufferPointer { ip in
+                memcpy(rp.baseAddress!, input.baseAddress!, blockSize * MemoryLayout<Float>.size)
+                vDSP_vclr(rp.baseAddress! + blockSize, 1, vDSP_Length(fftSize - blockSize))
+                vDSP_vclr(ip.baseAddress!, 1, vDSP_Length(fftSize))
                 fft.forward(rp.baseAddress!, ip.baseAddress!)
             }
         }
         fdlIndex = (fdlIndex + 1) % partitions
-        inRe[fdlIndex] = re
-        inIm[fdlIndex] = im
+        // Swap, don't assign: `inRe[fdlIndex] = re` would make the slot and
+        // the scratch share storage, and the next block's write into `re`
+        // would then trigger a copy-on-write allocation of fftSize floats —
+        // per block, on the render thread. The swapped-out old slot becomes
+        // scratch and is fully overwritten above before its next use.
+        swap(&inRe[fdlIndex], &re)
+        swap(&inIm[fdlIndex], &im)
 
         // Accumulate Σ input[t−p] × ir[p] in the frequency domain.
-        for i in 0..<fftSize { accRe[i] = 0; accIm[i] = 0 }
+        accRe.withUnsafeMutableBufferPointer { vDSP_vclr($0.baseAddress!, 1, vDSP_Length(fftSize)) }
+        accIm.withUnsafeMutableBufferPointer { vDSP_vclr($0.baseAddress!, 1, vDSP_Length(fftSize)) }
         for p in 0..<partitions {
             let slot = (fdlIndex - p + partitions) % partitions
             inRe[slot].withUnsafeBufferPointer { xr in
@@ -144,9 +157,15 @@ final class PartitionedConvolver {
             }
         }
         var out = [Float](repeating: 0, count: blockSize)
-        for i in 0..<blockSize {
-            out[i] = accRe[i] + overlap[i]
-            overlap[i] = accRe[blockSize + i]
+        accRe.withUnsafeBufferPointer { ar in
+            out.withUnsafeMutableBufferPointer { op in
+                overlap.withUnsafeMutableBufferPointer { ov in
+                    vDSP_vadd(ar.baseAddress!, 1, ov.baseAddress!, 1,
+                              op.baseAddress!, 1, vDSP_Length(blockSize))
+                    memcpy(ov.baseAddress!, ar.baseAddress! + blockSize,
+                           blockSize * MemoryLayout<Float>.size)
+                }
+            }
         }
         return out
     }

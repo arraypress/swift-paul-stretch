@@ -77,12 +77,17 @@ final class AudioRingBuffer {
 
         let n = min(count, free)
         guard n > 0 else { return 0 }
+        // Bulk copy in at most two wrap segments — the scalar per-frame
+        // loop was measurable against large chunks.
         l.withUnsafeBufferPointer { lp in
             r.withUnsafeBufferPointer { rp in
-                for i in 0..<n {
-                    let idx = Int((start + Int64(i))) & mask
-                    bufL[idx] = lp[i]
-                    bufR[idx] = rp[i]
+                let startIdx = Int(start) & mask
+                let first = min(n, capacity - startIdx)
+                memcpy(bufL + startIdx, lp.baseAddress!, first * MemoryLayout<Float>.size)
+                memcpy(bufR + startIdx, rp.baseAddress!, first * MemoryLayout<Float>.size)
+                if first < n {
+                    memcpy(bufL, lp.baseAddress! + first, (n - first) * MemoryLayout<Float>.size)
+                    memcpy(bufR, rp.baseAddress! + first, (n - first) * MemoryLayout<Float>.size)
                 }
             }
         }
@@ -106,10 +111,15 @@ final class AudioRingBuffer {
 
         let n = min(count, avail)
         guard n > 0 else { return 0 }
-        for i in 0..<n {
-            let idx = Int((start + Int64(i))) & mask
-            outL[i] = bufL[idx]
-            outR[i] = bufR[idx]
+        // Bulk copy in at most two wrap segments (realtime-safe: memcpy
+        // allocates nothing).
+        let startIdx = Int(start) & mask
+        let first = min(n, capacity - startIdx)
+        memcpy(outL, bufL + startIdx, first * MemoryLayout<Float>.size)
+        memcpy(outR, bufR + startIdx, first * MemoryLayout<Float>.size)
+        if first < n {
+            memcpy(outL + first, bufL, (n - first) * MemoryLayout<Float>.size)
+            memcpy(outR + first, bufR, (n - first) * MemoryLayout<Float>.size)
         }
 
         os_unfair_lock_lock(&lock)

@@ -55,7 +55,7 @@ final class NewEffectsTests: XCTestCase {
     /// leaves behind.
     func testCentrePanIsUnityGain() {
         let src = buffer(0.5)
-        let out = StereoPlacement(pan: 0, width: 1).process(l: src.l, r: src.r)
+        let out = StereoPlacement(sampleRate: 44100, pan: 0, width: 1).process(l: src.l, r: src.r)
         var worst: Float = 0
         for i in 0..<src.l.count { worst = max(worst, abs(out.l[i] - src.l[i])) }
         XCTAssertLessThan(worst, 1e-5, "centre pan altered the signal by \(worst)")
@@ -64,7 +64,7 @@ final class NewEffectsTests: XCTestCase {
     /// Panning right must move energy right.
     func testPanShiftsEnergy() {
         let src = buffer(0.5)
-        let out = StereoPlacement(pan: 1, width: 1).process(l: src.l, r: src.r)
+        let out = StereoPlacement(sampleRate: 44100, pan: 1, width: 1).process(l: src.l, r: src.r)
         func rms(_ a: [Float]) -> Float { (a.reduce(0) { $0 + $1 * $1 } / Float(a.count)).squareRoot() }
         XCTAssertLessThan(rms(out.l), 0.01, "hard right still had left content")
         XCTAssertGreaterThan(rms(out.r), 0.1)
@@ -73,7 +73,7 @@ final class NewEffectsTests: XCTestCase {
     /// Width 0 must collapse to mono: both channels identical.
     func testZeroWidthCollapsesToMono() {
         let src = buffer(0.5, stereoSpread: true)
-        let out = StereoPlacement(pan: 0, width: 0).process(l: src.l, r: src.r)
+        let out = StereoPlacement(sampleRate: 44100, pan: 0, width: 0).process(l: src.l, r: src.r)
         var worst: Float = 0
         for i in 0..<out.l.count { worst = max(worst, abs(out.l[i] - out.r[i])) }
         XCTAssertLessThan(worst, 1e-5, "width 0 left \(worst) of stereo difference")
@@ -87,8 +87,8 @@ final class NewEffectsTests: XCTestCase {
             for i in 0..<p.l.count { let s = (p.l[i] - p.r[i]) * 0.5; e += s * s }
             return (e / Float(p.l.count)).squareRoot()
         }
-        let normal = StereoPlacement(pan: 0, width: 1).process(l: src.l, r: src.r)
-        let wide = StereoPlacement(pan: 0, width: 2).process(l: src.l, r: src.r)
+        let normal = StereoPlacement(sampleRate: 44100, pan: 0, width: 1).process(l: src.l, r: src.r)
+        let wide = StereoPlacement(sampleRate: 44100, pan: 0, width: 2).process(l: src.l, r: src.r)
         XCTAssertGreaterThan(side(wide), side(normal) * 1.8)
     }
 

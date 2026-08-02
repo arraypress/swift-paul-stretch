@@ -28,6 +28,22 @@ protocol PureStage: AnyObject {
     /// Flushes any ring-out after the input ends (empty for tail-less
     /// effects). Called once.
     func tail() -> (l: [Float], r: [Float])
+    /// Retunes the stage's CONTINUOUS parameters in place, keeping all state —
+    /// delay lines, tanks, phases — so a knob move or an automation tick never
+    /// truncates a tail. Structural settings (voice counts, tank sizes,
+    /// impulse responses) are ignored here; when one of those changes the host
+    /// must rebuild via ``makePureStages`` — compare
+    /// ``EffectsParameters/pureDSPStructureSignature`` to know which is needed.
+    ///
+    /// Called from the render callback, so implementations must not allocate;
+    /// stages slew audibly-sensitive values over ~30 ms internally so a step
+    /// arrives as a short glide, not a zipper.
+    func update(from fx: EffectsParameters)
+}
+
+extension PureStage {
+    /// Stages opt in; a stage with no continuous parameters ignores updates.
+    func update(from fx: EffectsParameters) {}
 }
 
 extension ShimmerReverb: PureStage {}
@@ -124,7 +140,7 @@ func makePureStages(sampleRate: Double,
                     mix: Double(fx.pitchMix))
     }
     func buildPlacement() -> PureStage {
-        StereoPlacement(pan: fx.placementPan, width: fx.placementWidth)
+        StereoPlacement(sampleRate: sampleRate, pan: fx.placementPan, width: fx.placementWidth)
     }
 
     /// Builds one slot's stage, or nothing if that unit is off.

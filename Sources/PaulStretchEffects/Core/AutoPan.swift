@@ -22,9 +22,16 @@ import PaulStretch
 /// snapping.
 public final class AutoPan: PureStage {
 
-    private let depth: Double
-    private let rateHz: Double
+    /// Sweep width, slewed toward `targetDepth` — it scales the pan swing
+    /// directly, so a stepped knob move would otherwise zipper the image.
+    private var depth: Double
+    private var targetDepth: Double
+    /// Applied instantly on retune: the phase accumulates incrementally, so
+    /// a new rate only changes the increment — phase-continuous.
+    private var rateHz: Double
     private let sampleRate: Double
+    /// One-pole coefficient for the ~30 ms parameter slew.
+    private let paramSlew: Double
     private let depthLane: AutomationLane?
     private let rateLane: AutomationLane?
     private let totalFrames: Int?
@@ -49,8 +56,12 @@ public final class AutoPan: PureStage {
                 rateLane: AutomationLane? = nil,
                 totalFrames: Int? = nil) {
         self.sampleRate = sampleRate
-        self.depth = Double(min(max(depth, 0), 1))
+        let d = Double(min(max(depth, 0), 1))
+        self.depth = d
+        self.targetDepth = d
         self.rateHz = Double(min(max(rateHz, 0.01), 8))
+        // One-pole reaching ~63 % of a step in 30 ms.
+        self.paramSlew = 1 - exp(-1 / (0.03 * sampleRate))
         self.depthLane = depthLane
         self.rateLane = rateLane
         self.totalFrames = totalFrames
@@ -58,15 +69,18 @@ public final class AutoPan: PureStage {
 
     public func process(l: [Float], r: [Float]) -> (l: [Float], r: [Float]) {
         let n = min(l.count, r.count)
-        if depth <= 0 && depthLane == nil { return (l: l, r: r) }
+        // Identity bypass is safe here (no buffer to keep fed): the phase
+        // simply stands still until a retune arrives.
+        if depth <= 0 && targetDepth <= 0 && depthLane == nil { return (l: l, r: r) }
         var outL = [Float](repeating: 0, count: n)
         var outR = [Float](repeating: 0, count: n)
         let twoPiOverSr = 2 * Double.pi / sampleRate
-        let baseDepth = depth > 0 ? depth : 1
         let quarterPi = Double.pi / 4
 
         for i in 0..<n {
             let frame = position + i
+            depth += (targetDepth - depth) * paramSlew
+            let baseDepth = depth > 0 ? depth : 1
             let hz: Double
             if let lane = rateLane, let total = totalFrames, total > 1 {
                 hz = 0.01 + lane.value(at: Double(frame) / Double(total - 1)) * 1.99
@@ -89,6 +103,15 @@ public final class AutoPan: PureStage {
     }
 
     public func tail() -> (l: [Float], r: [Float]) { ([], []) }
+
+    /// Retunes depth and rate in place. Depth is a target the per-sample slew
+    /// chases; rate lands instantly because the phase is integrated. Runs on
+    /// the audio thread — plain stored writes only. Clamps match the
+    /// initialiser's.
+    func update(from fx: EffectsParameters) {
+        targetDepth = Double(min(max(fx.autoPanDepth, 0), 1))
+        rateHz = Double(min(max(fx.autoPanRateHz, 0.01), 8))
+    }
 }
 
 #endif  // !os(watchOS)

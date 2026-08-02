@@ -30,8 +30,18 @@ import Foundation
 /// everywhere while each tap is silent exactly where it wraps. The seam is
 /// inaudible because nothing is crossing it.
 ///
-/// The cost is a gentle smearing at large intervals, which on the washed-out
-/// material this library produces is an asset rather than a flaw.
+/// The cost is a gentle smearing at large intervals — and a periodic
+/// crossfade whose rate grows with the interval (25 Hz at +12: audible as a
+/// slow wobble). On the washed-out material this library produces that is
+/// mostly an asset; it is inherent to the architecture, not a defect.
+///
+/// ### Glides
+///
+/// Pitch, detune, spread and mix all retune IN PLACE via ``update(from:)``:
+/// the shift is just the read pointer's speed, so a slewed ratio change is a
+/// glide by construction — no rebuild, no phase reset, no click. Values slew
+/// over ~30 ms, so a stepped automation curve still arrives as a short
+/// portamento.
 ///
 /// ### Voices
 ///
@@ -44,11 +54,18 @@ final class PitchVoices {
 
     /// One shifting voice.
     private struct Voice {
+        /// The ratio the audio is currently being read at.
         var ratio: Double
+        /// Where ``update(from:)`` wants the ratio to be; `ratio` slews here.
+        var targetRatio: Double
         /// Read lag behind the write pointer, in samples, `0..<bufferLength`.
         var phase: Double
         /// `-1` hard left to `+1` hard right.
         var pan: Double
+        /// Constant-power balance gains for `pan`, precomputed — recomputing
+        /// `cos`/`sin` per sample was measurable across four voices.
+        var gainL: Float
+        var gainR: Float
     }
 
     private let sampleRate: Double
@@ -62,7 +79,24 @@ final class PitchVoices {
     private var bufferR: [Float]
     private var writeIndex = 0
     private var voices: [Voice]
-    private let mix: Double
+    private var mix: Double
+    private var targetMix: Double
+    /// One-pole coefficient for the ~30 ms parameter slew.
+    private let slew: Double
+
+    /// Balance gains for a pan position, constant-power and UNITY at centre.
+    ///
+    /// The raw `cos`/`sin` law put a single centred voice at 0.707 per
+    /// channel — the whole effect sat 3 dB under the dry signal at full mix,
+    /// which is most of what "the pitch effect is weak" was. Compensated by
+    /// √2 so centre is exactly unity; a hard-panned voice peaks at +3 dB on
+    /// its side, which the `1/√count` voice gain absorbs (spread panning only
+    /// happens with two or more voices).
+    private static func balance(_ pan: Double) -> (l: Float, r: Float) {
+        let angle = (min(max(pan, -1), 1) + 1) * .pi / 4
+        let comp = 2.0.squareRoot()
+        return (Float(cos(angle) * comp), Float(sin(angle) * comp))
+    }
 
     /// - Parameters:
     ///   - sampleRate: Stream rate, in hertz.
@@ -79,25 +113,41 @@ final class PitchVoices {
         length = max(256, Int(0.08 * sampleRate))
         bufferL = [Float](repeating: 0, count: length)
         bufferR = [Float](repeating: 0, count: length)
-        self.mix = min(max(mix / 100, 0), 1)
+        let m = min(max(mix / 100, 0), 1)
+        self.mix = m
+        self.targetMix = m
+        // One-pole reaching ~63 % of a step in 30 ms.
+        self.slew = 1 - exp(-1 / (0.03 * sampleRate))
 
         let count = min(max(voiceCount, 1), 4)
-        let base = semitones + cents / 100
         // Built from locals rather than from `self`: the closure would capture
         // an object whose members are not all initialised yet.
         let bufferLength = length
+        let ratios = Self.ratios(semitones: semitones, cents: cents,
+                                 spread: spread, count: count)
         voices = (0..<count).map { i -> Voice in
-            // Voices are spread symmetrically around the requested pitch, so
-            // turning spread up does not also transpose the sound.
-            let offset = count == 1 ? 0
-                : (Double(i) / Double(count - 1) - 0.5) * 2 * spread / 100
             let pan = count == 1 ? 0 : (Double(i) / Double(count - 1) - 0.5) * 2
-            return Voice(ratio: pow(2, (base + offset) / 12),
+            let g = Self.balance(pan)
+            return Voice(ratio: ratios[i],
+                         targetRatio: ratios[i],
                          // Stagger the starting phases so the voices do not all
                          // wrap on the same sample, which would make the
                          // crossfade audible as a single periodic pulse.
                          phase: Double(i) / Double(count) * Double(bufferLength),
-                         pan: pan)
+                         pan: pan,
+                         gainL: g.l, gainR: g.r)
+        }
+    }
+
+    /// The per-voice ratios for a pitch setting: spread symmetrically around
+    /// the requested pitch, so turning spread up does not also transpose.
+    private static func ratios(semitones: Double, cents: Double,
+                               spread: Double, count: Int) -> [Double] {
+        let base = semitones + cents / 100
+        return (0..<count).map { i in
+            let offset = count == 1 ? 0
+                : (Double(i) / Double(count - 1) - 0.5) * 2 * spread / 100
+            return pow(2, (base + offset) / 12)
         }
     }
 
@@ -119,7 +169,7 @@ final class PitchVoices {
     }
 
     func process(l: [Float], r: [Float]) -> (l: [Float], r: [Float]) {
-        guard mix > 0.0001, !voices.isEmpty else { return (l, r) }
+        guard mix > 0.0001 || targetMix > 0.0001, !voices.isEmpty else { return (l, r) }
         var outL = l, outR = r
         let half = Double(length) / 2
         let gain = Float(1.0 / Double(voices.count).squareRoot())
@@ -127,9 +177,14 @@ final class PitchVoices {
         for n in 0..<l.count {
             bufferL[writeIndex] = l[n]
             bufferR[writeIndex] = r[n]
+            mix += (targetMix - mix) * slew
 
             var wetL: Float = 0, wetR: Float = 0
             for v in voices.indices {
+                // The slewed ratio IS the glide: pitch is nothing but the
+                // read pointer's speed, so easing the ratio toward its target
+                // sweeps the pitch with no discontinuity to click.
+                voices[v].ratio += (voices[v].targetRatio - voices[v].ratio) * slew
                 // Read position advances by `ratio` per output sample while
                 // write advances by 1, so the LAG between them changes by
                 // (1 - ratio). Shifting up means the read catches up.
@@ -144,15 +199,15 @@ final class PitchVoices {
                 let p0 = voices[v].phase
                 let p1 = p0 < half ? p0 + half : p0 - half
                 let w0 = window(p0 / Double(length))
-                let w1 = window(p1 / Double(length))
+                // Hann half-shift identity: w(x) + w(x + 0.5) == 1, so the
+                // second window is free.
+                let w1 = 1 - w0
 
                 let sampleL = read(bufferL, lag: p0) * w0 + read(bufferL, lag: p1) * w1
                 let sampleR = read(bufferR, lag: p0) * w0 + read(bufferR, lag: p1) * w1
 
-                // Equal-power pan, so spreading voices does not change level.
-                let angle = (voices[v].pan + 1) * .pi / 4
-                wetL += sampleL * Float(cos(angle))
-                wetR += sampleR * Float(sin(angle))
+                wetL += sampleL * voices[v].gainL
+                wetR += sampleR * voices[v].gainR
             }
 
             writeIndex = (writeIndex + 1) % length
@@ -168,6 +223,23 @@ extension PitchVoices: PureStage {
     /// The buffer is only 80 ms and the dry path is unaffected, so there is
     /// nothing meaningful to flush.
     func tail() -> (l: [Float], r: [Float]) { ([], []) }
+
+    /// Retunes pitch, detune, spread and mix in place — the automation path.
+    /// Voice COUNT is structural (it changes the voice array and the phase
+    /// stagger) and is ignored here; a count change must rebuild the stage.
+    /// Runs on the audio thread, so no arrays: the ratio formula is applied
+    /// per voice directly.
+    func update(from fx: EffectsParameters) {
+        let count = voices.count
+        let base = Double(fx.pitchSemitones) + Double(fx.pitchCents) / 100
+        let spread = Double(fx.pitchSpread)
+        for v in voices.indices {
+            let offset = count == 1 ? 0
+                : (Double(v) / Double(count - 1) - 0.5) * 2 * spread / 100
+            voices[v].targetRatio = pow(2, (base + offset) / 12)
+        }
+        targetMix = min(max(Double(fx.pitchMix) / 100, 0), 1)
+    }
 }
 
 #endif  // !os(watchOS)

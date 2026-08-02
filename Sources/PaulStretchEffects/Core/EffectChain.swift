@@ -223,6 +223,10 @@ public final class EffectChain {
             node.bandwidth = max(0.05, min(b.bandwidth, 5))
             node.bypass = !(fx.eqEnabled && b.enabled)
         }
+        // Output make-up after the bands. This went unset for as long as the
+        // bands existed — the one AVAudioUnitEQ parameter that was never
+        // exposed anywhere.
+        eq.globalGain = max(-24, min(fx.eqGlobalGain, 24))
         eq.bypass = !fx.eqEnabled
 
         // Delay

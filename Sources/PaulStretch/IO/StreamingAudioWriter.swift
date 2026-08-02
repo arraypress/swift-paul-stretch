@@ -32,6 +32,11 @@ public final class StreamingAudioWriter {
 
     private var file: AVAudioFile?
     private let format: AVAudioFormat
+    /// Reused per-append staging buffer — allocating a fresh
+    /// `AVAudioPCMBuffer` per chunk was measurable churn on the render
+    /// path; `frameLength` is set per call instead.
+    private let scratch: AVAudioPCMBuffer
+    private static let scratchCapacity = 65536
 
     /// The on-disk format being written.
     public let fileFormat: AudioFileFormat
@@ -61,6 +66,11 @@ public final class StreamingAudioWriter {
                                 commonFormat: .pcmFormatFloat32, interleaved: false)
         self.file = f
         self.format = f.processingFormat
+        guard let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat,
+                                         frameCapacity: AVAudioFrameCount(Self.scratchCapacity)) else {
+            throw AudioFileIOError.cannotAllocateBuffer
+        }
+        self.scratch = buf
     }
 
     /// Appends stereo samples to the file, encoding as it goes.
@@ -79,17 +89,18 @@ public final class StreamingAudioWriter {
         let total = min(l.count, r.count)
         guard total > 0 else { return }
 
-        let chunk = 65536
         var pos = 0
         while pos < total {
-            let n = min(chunk, total - pos)
-            guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n)) else {
-                throw AudioFileIOError.cannotAllocateBuffer
+            let n = min(Self.scratchCapacity, total - pos)
+            scratch.frameLength = AVAudioFrameCount(n)
+            let ch = scratch.floatChannelData!
+            l.withUnsafeBufferPointer { lp in
+                r.withUnsafeBufferPointer { rp in
+                    memcpy(ch[0], lp.baseAddress! + pos, n * MemoryLayout<Float>.size)
+                    memcpy(ch[1], rp.baseAddress! + pos, n * MemoryLayout<Float>.size)
+                }
             }
-            buf.frameLength = AVAudioFrameCount(n)
-            let ch = buf.floatChannelData!
-            for i in 0..<n { ch[0][i] = l[pos + i]; ch[1][i] = r[pos + i] }
-            try file.write(from: buf)
+            try file.write(from: scratch)
             pos += n
         }
         framesWritten += total
