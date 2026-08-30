@@ -79,6 +79,50 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertEqual(hz, 220, accuracy: 8, "half tape speed should halve the pitch")
     }
 
+    func testPassthroughSeamsNeverClipOnCorrelatedMaterial() {
+        // A steady tone tiled into itself is the worst case for an equal-power
+        // seam: the sides are fully correlated and sum to +3 dB. The seam
+        // shape follows the measured correlation, so the peak stays put.
+        let source = TestSignals.sine(220, seconds: 2.0).peakNormalized(to: 0.989)
+        let p = params { $0.mode = .tapeSlow; $0.tapeSpeed = 0.5; $0.targetSeconds = 14; $0.fadeInSeconds = 0; $0.fadeOutSeconds = 0 }
+        let out = StretchRenderer.render(source, parameters: p)
+        let peak = max(out.l.map(abs).max() ?? 0, out.r.map(abs).max() ?? 0)
+        XCTAssertLessThanOrEqual(peak, 0.989 + 0.002, "seams must not overshoot the source's own peak")
+        XCTAssertGreaterThan(out.duration, 13.9)
+    }
+
+    func testPassthroughRenderIsNeverLouderThanItsSource() {
+        // Full-scale noise tiled into itself: uncorrelated, so the seam is
+        // equal-power and coincident peaks would sum to 1.4× without the
+        // guard. The render is held to the source's own peak, and the
+        // chunked path must land on the same gain.
+        let source = TestSignals.noise(seconds: 2.0, seed: 3).peakNormalized(to: 0.989)
+        let p = params { $0.mode = .tapeSlow; $0.tapeSpeed = 0.5; $0.targetSeconds = 14; $0.fadeInSeconds = 0; $0.fadeOutSeconds = 0 }
+        let out = StretchRenderer.render(source, parameters: p)
+        let peak = max(out.l.map(abs).max() ?? 0, out.r.map(abs).max() ?? 0)
+        XCTAssertLessThanOrEqual(peak, 0.989 + 0.001, "held to the source's peak")
+        XCTAssertGreaterThan(peak, 0.9, "held, not squashed")
+        var l: [Float] = [], r: [Float] = []
+        _ = StretchRenderer.renderChunks(source, parameters: p, chunkFrames: 30_000) { l += $0.l; r += $0.r }
+        assertSamplesIdentical(l, out.l, "chunked vs in-memory with the guard")
+    }
+
+    func testPassthroughSeamsKeepPowerFlatOnUncorrelatedMaterial() {
+        // Noise tiled into itself is the other extreme: uncorrelated, where a
+        // linear seam would dip 3 dB. The blend keeps it level within 1 dB.
+        let source = TestSignals.noise(seconds: 2.0, seed: 7)
+        let p = params { $0.mode = .tapeSlow; $0.tapeSpeed = 0.5; $0.targetSeconds = 14; $0.fadeInSeconds = 0; $0.fadeOutSeconds = 0 }
+        let out = StretchRenderer.render(source, parameters: p)
+        // Block = 4 s slowed, fade = 1 s (a quarter of the block): the first
+        // seam is centred at 3.5 s; 1.5 s is mid-tile.
+        func rms(at t: Double) -> Double {
+            let s = Int(t * 44_100) - 2205, e = s + 4410
+            return (out.l[s..<e].reduce(0.0) { $0 + Double($1 * $1) } / 4410).squareRoot()
+        }
+        let seam = 20 * log10(rms(at: 3.5) / rms(at: 1.5))
+        XCTAssertEqual(seam, 0, accuracy: 1.0, "seam power off by \(seam) dB")
+    }
+
     func testFreezeKeepsTheSourceTone() {
         // Freeze a pure 330 Hz tone with no smear: the sustained output's
         // dominant frequency must stay at ~330 Hz.

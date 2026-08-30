@@ -209,6 +209,7 @@ public enum StretchRenderer {
                                         stretchedLength: layer.stretchedFrames,
                                         rangeStart: 0, rangeEnd: totalFrames,
                                         outL: llp.baseAddress!, outR: lrp.baseAddress!,
+                                        seamBlend: layer.seamBlend,
                                         provider: provider)
                     }
                 }
@@ -221,6 +222,7 @@ public enum StretchRenderer {
                                         stretchedLength: layer.stretchedFrames,
                                         rangeStart: 0, rangeEnd: totalFrames,
                                         outL: mlp.baseAddress!, outR: mrp.baseAddress!,
+                                        seamBlend: layer.seamBlend,
                                         provider: provider)
                     }
                 }
@@ -237,6 +239,19 @@ public enum StretchRenderer {
             }
             if peak > 0 {
                 let g = 0.92 / peak
+                for f in 0..<totalFrames { mixL[f] *= g; mixR[f] *= g }
+            }
+        } else if plan.isAllPassthrough {
+            // Held to the source's own peak — see RenderPlan.isAllPassthrough.
+            // Mirrored exactly in ChunkedRun.computeGains.
+            var peak: Float = 0
+            for f in 0..<totalFrames {
+                let a = abs(mixL[f]); let b = abs(mixR[f])
+                if a > peak { peak = a }
+                if b > peak { peak = b }
+            }
+            if peak > plan.srcPeak, peak > 0 {
+                let g = plan.srcPeak / peak
                 for f in 0..<totalFrames { mixL[f] *= g; mixR[f] *= g }
             }
         }

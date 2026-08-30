@@ -123,10 +123,15 @@ extension StereoBuffer {
 
     /// Returns the buffer varispeed-resampled like a tape machine.
     ///
-    /// Linear-interpolation resampling: `speed < 1` makes the audio longer
-    /// *and* lower-pitched (the "slowed + reverb" treatment), `speed > 1`
-    /// shorter and higher. Speeds within 0.001 of `1` return the buffer
-    /// unchanged.
+    /// Varispeed resampling: `speed < 1` makes the audio longer *and*
+    /// lower-pitched (the "slowed + reverb" treatment), `speed > 1` shorter
+    /// and higher. Speeds within 0.001 of `1` return the buffer unchanged.
+    ///
+    /// Windowed-sinc interpolation (64 taps, Blackman window, phase table).
+    /// It replaced linear interpolation, whose images sat at about -42 dB
+    /// and put a faint band at 16–18 kHz into every half-speed render;
+    /// slowing down keeps the source band intact, speeding up band-limits
+    /// to the new Nyquist so nothing aliases.
     ///
     /// - Parameter speed: The playback-speed factor, e.g. `0.5` for
     ///   half-speed / one octave down.
@@ -135,16 +140,17 @@ extension StereoBuffer {
         if abs(speed - 1) < 0.001 { return self }
         let n = frameCount
         let outFrames = max(1, Int((Double(n) / speed).rounded(.up)))
+        guard n > 0 else { return StereoBuffer(silenceFrames: outFrames, sampleRate: sampleRate) }
+        let kernel = SincKernel(speed: speed)
         var outL = [Float](repeating: 0, count: outFrames)
         var outR = [Float](repeating: 0, count: outFrames)
-        for i in 0..<outFrames {
-            let srcPos = Double(i) * speed
-            let i0 = Int(srcPos.rounded(.down))
-            if i0 >= 0 && i0 < n {
-                let frac = Float(srcPos - Double(i0))
-                let i1 = min(i0 + 1, n - 1)
-                outL[i] = l[i0] * (1 - frac) + l[i1] * frac
-                outR[i] = r[i0] * (1 - frac) + r[i1] * frac
+        l.withUnsafeBufferPointer { sl in
+            r.withUnsafeBufferPointer { sr in
+                for i in 0..<outFrames {
+                    let (a, b) = kernel.sample(sl, sr, count: n, at: Double(i) * speed)
+                    outL[i] = a
+                    outR[i] = b
+                }
             }
         }
         return StereoBuffer(l: outL, r: outR, sampleRate: sampleRate)

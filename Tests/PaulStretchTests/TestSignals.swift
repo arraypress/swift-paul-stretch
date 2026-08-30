@@ -30,6 +30,21 @@ enum TestSignals {
         return StereoBuffer(l: l, r: r, sampleRate: sr)
     }
 
+    /// Deterministic white noise (a 64-bit LCG), for the uncorrelated case.
+    static func noise(seconds: Double = 1.5, amplitude: Float = 0.5, seed: UInt64 = 1,
+                      sampleRate sr: Double = 44_100) -> StereoBuffer {
+        let n = Int(sr * seconds)
+        var l = [Float](repeating: 0, count: n)
+        var r = [Float](repeating: 0, count: n)
+        var state = seed &* 0x9E3779B97F4A7C15 | 1
+        func next() -> Float {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Float(Double(state >> 11) / Double(1 << 53)) * 2 - 1
+        }
+        for i in 0..<n { l[i] = next() * amplitude; r[i] = next() * amplitude }
+        return StereoBuffer(l: l, r: r, sampleRate: sr)
+    }
+
     /// A pure sine, useful for pitch/spectrum assertions.
     static func sine(_ hz: Double, seconds: Double = 1.5, amplitude: Float = 0.5,
                      sampleRate sr: Double = 44_100) -> StereoBuffer {

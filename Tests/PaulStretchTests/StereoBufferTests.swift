@@ -56,6 +56,35 @@ final class StereoBufferTests: XCTestCase {
                        "half speed should halve the pitch")
     }
 
+    func testTapeSpeedResamplerLeavesNoImages() {
+        // A 1 kHz tone at half speed is exactly a 500 Hz tone, sample for
+        // sample, so the resampler's whole error is the null against one
+        // synthesised directly. Linear interpolation nulls at about -40 dB
+        // (its images); a windowed sinc must do far better.
+        let src = TestSignals.sine(1000, seconds: 1.0)
+        let slow = src.applyingTapeSpeed(0.5)
+        let sr = 44_100.0
+        var num = 0.0, den = 0.0
+        // Skip the kernel's reach at either end, where the source is silence.
+        for i in 200..<(slow.frameCount - 200) {
+            let ideal = 0.5 * sin(2 * Double.pi * 500 * Double(i) / sr)
+            let d = Double(slow.l[i]) - ideal
+            num += d * d; den += ideal * ideal
+        }
+        let null = 10 * log10(num / den)
+        XCTAssertLessThan(null, -60, "resampler nulls against the ideal at \(null) dB")
+    }
+
+    func testTapeSpeedUpBandLimitsInsteadOfAliasing() {
+        // 18 kHz at 1.5× would land at 27 kHz — above Nyquist. It must be
+        // removed, not folded back to 17.1 kHz.
+        let src = TestSignals.sine(18_000, seconds: 1.0)
+        let fast = src.applyingTapeSpeed(1.5)
+        let rmsIn = (src.l.reduce(0.0) { $0 + Double($1 * $1) } / Double(src.frameCount)).squareRoot()
+        let rmsOut = (fast.l.reduce(0.0) { $0 + Double($1 * $1) } / Double(fast.frameCount)).squareRoot()
+        XCTAssertLessThan(20 * log10(rmsOut / rmsIn), -40, "an above-Nyquist tone must vanish, not alias")
+    }
+
     func testTapeSpeedNearUnityIsPassthrough() {
         let src = TestSignals.source(seconds: 0.5)
         let out = src.applyingTapeSpeed(1.0004)

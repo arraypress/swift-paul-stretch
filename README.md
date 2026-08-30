@@ -269,7 +269,7 @@ The pipeline pieces are exposed directly when you don't want the full render:
 let washed = PaulStretcher.stretch(source, ratio: 8)                    // raw stretch
 let frozen = SpectralFreezer.render(source, position: 0.5, smear: 0.3,
                                     targetSeconds: 120)                 // raw freeze
-let slow   = source.applyingTapeSpeed(0.5)                              // varispeed
+let slow   = source.applyingTapeSpeed(0.5)                              // varispeed (windowed sinc)
 let wide   = drone.applyingStereoWidth(1.4)                             // mid/side width
 let ready  = drone.seamlesslyLooped()                                   // loop crossfade
 ```
@@ -554,6 +554,20 @@ bounded memory. Rules of thumb:
 - **iOS export of a genuine long render** → `renderToWAVFile(...)`; a
   60-minute file streams to disk in well under a minute of CPU on modern
   phones instead of holding ~1.3 GB (+ intermediates) in RAM.
+
+**Tape-slow tiles are held to the source's peak.** Passthrough tiles are never
+normalised — the caller's level is kept — but where two full-scale tiles overlap
+at a seam their peaks can coincide and sum past full scale (a pad measured
++0.98 dBFS, clipped at every seam). Every seam's crossfade now follows the
+measured correlation between the block's tail and head (equal-power for
+uncorrelated material, linear for correlated, solved in closed form for the
+midpoint to sit at unity power), and the whole passthrough render is scaled down
+— only down — to the peak of the source as given, measured before varispeed.
+Both renderers compute it identically, so chunked and in-memory stay bit-exact.
+
+**Varispeed is a windowed sinc** (64 taps, Blackman, 512-phase table): it nulls
+against an ideal resample at better than -60 dB where linear interpolation
+managed -42, and speeding up band-limits to the new Nyquist instead of aliasing.
 
 A bare stretch carries ~30 % amplitude flutter — that is inherent to
 PaulStretch's phase randomisation (reference implementations measure the

@@ -26,6 +26,10 @@ struct LayerPlan {
     let stretchedFrames: Int
     /// The tile schedule filling the target duration with this layer's block.
     let tiles: [Tile]
+    /// The seam crossfade shape: `1` equal-power for stretched blocks (their
+    /// sides are decorrelated), measured from the block's own head and tail
+    /// for passthrough blocks, which are the same recording meeting itself.
+    let seamBlend: Double
 }
 
 /// A fully-resolved render: shaped source, engine path and output geometry.
@@ -60,6 +64,21 @@ struct RenderPlan {
     let loopCrossfadeFrames: Int
     /// Frames in the delivered render (after the loop trim, if any).
     var finalFrames: Int { max(0, preLoopFrames - loopCrossfadeFrames) }
+    /// The caller's source peak, measured before varispeed — the ceiling a
+    /// passthrough render is held to (see ``isAllPassthrough``).
+    let srcPeak: Float
+
+    /// `true` when the timeline is nothing but the shaped source tiled onto
+    /// itself (tape-slow, or a stretch whose ratio collapsed to 1). Those
+    /// tiles are deliberately never normalised, so the source's level is
+    /// kept — but where two full-scale tiles overlap at a seam their peaks
+    /// can coincide and sum past full scale (a pad measured +0.98 dBFS,
+    /// clipped at every seam). Both renderers therefore scale such a render
+    /// DOWN, and only down, to the source's own peak.
+    var isAllPassthrough: Bool {
+        if case .tiled(let layers, _) = path { return layers.allSatisfy(\.passthrough) }
+        return false
+    }
 }
 
 /// Builds the plan for a render, mirroring the reference pipeline exactly:
@@ -68,6 +87,13 @@ struct RenderPlan {
 func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64) -> RenderPlan {
     var src = source
     if p.reverse { src = src.reversed() }
+    // The ceiling a passthrough render is held to is the peak of what the
+    // caller handed over, measured BEFORE varispeed: band-limited
+    // interpolation legitimately reconstructs inter-sample peaks above the
+    // sample peaks, and those must not clip on the way out either.
+    var srcPeak: Float = 0
+    for v in src.l where abs(v) > srcPeak { srcPeak = abs(v) }
+    for v in src.r where abs(v) > srcPeak { srcPeak = abs(v) }
     if abs(p.tapeSpeed - 1) > 0.001 { src = src.applyingTapeSpeed(p.tapeSpeed) }
     let sr = src.sampleRate
     let renderSeconds = p.seamlessLoop
@@ -155,11 +181,15 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
             let tiles = planTiles(stretchedDur: stretchedDur,
                                   targetSec: renderSeconds,
                                   fadeSec: tileFade)
+            let blend = passthrough
+                ? seamBlend(correlation: seamCorrelation(l: src.l, r: src.r, fadeFrames: Int(tileFade * sr)))
+                : 1.0
             layers.append(LayerPlan(gain: recipe.gain,
                                     passthrough: passthrough,
                                     kernel: kernel,
                                     stretchedFrames: stretchedFrames,
-                                    tiles: tiles))
+                                    tiles: tiles,
+                                    seamBlend: blend))
         }
         path = .tiled(layers, layeredNormalize: layered)
         preLoopFrames = Int(renderSeconds * sr)
@@ -177,5 +207,6 @@ func makeRenderPlan(_ source: StereoBuffer, _ p: StretchParameters, seed: UInt64
                       seed: seed,
                       path: path,
                       preLoopFrames: preLoopFrames,
-                      loopCrossfadeFrames: loopCrossfadeFrames)
+                      loopCrossfadeFrames: loopCrossfadeFrames,
+                      srcPeak: srcPeak)
 }

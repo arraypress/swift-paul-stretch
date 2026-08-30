@@ -237,7 +237,7 @@ final class ChunkedRun {
             for layer in layers where layer.kernel != nil {
                 total += Double(layer.stretchedFrames)
             }
-            if layeredNormalize { total += Double(plan.preLoopFrames) }
+            if layeredNormalize || plan.isAllPassthrough { total += Double(plan.preLoopFrames) }
             stretchGains = [Float?](repeating: nil, count: layers.count)
         case .freeze(let kernel):
             total += Double(kernel.outputLength)
@@ -396,6 +396,27 @@ final class ChunkedRun {
                     s = e
                 }
                 mixGain = peak > 0 ? 0.92 / peak : nil
+            } else if plan.isAllPassthrough {
+                // Held to the source's own peak — the in-memory renderer's
+                // scan, frame for frame, so the two stay bit-identical.
+                var peak: Float = 0
+                var mixL = [Float](repeating: 0, count: sweepFrames)
+                var mixR = [Float](repeating: 0, count: sweepFrames)
+                var s = 0
+                while s < plan.preLoopFrames {
+                    if isCancelled() { return false }
+                    let e = min(plan.preLoopFrames, s + sweepFrames)
+                    let n = e - s
+                    guard renderMixRange(s, e, mixL: &mixL, mixR: &mixR, isCancelled: isCancelled) else { return false }
+                    for f in 0..<n {
+                        let a = abs(mixL[f]); let b = abs(mixR[f])
+                        if a > peak { peak = a }
+                        if b > peak { peak = b }
+                    }
+                    addUnits(n)
+                    s = e
+                }
+                mixGain = peak > plan.srcPeak && peak > 0 ? plan.srcPeak / peak : nil
             }
             return true
         }
@@ -483,7 +504,8 @@ final class ChunkedRun {
                         accumulateTiles(layer.tiles, sampleRate: self.plan.sampleRate,
                                         stretchedLength: layer.stretchedFrames,
                                         rangeStart: a, rangeEnd: b,
-                                        outL: tL, outR: tR) { range, body in
+                                        outL: tL, outR: tR,
+                                        seamBlend: layer.seamBlend) { range, body in
                             if let kernel = layer.kernel {
                                 // Re-render just the stretched frames these
                                 // tiles need, then apply the layer's exact

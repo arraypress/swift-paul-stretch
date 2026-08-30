@@ -37,9 +37,52 @@ func planTiles(stretchedDur: Double, targetSec: Double, fadeSec: Double) -> [Til
     return tiles
 }
 
-/// Overlap-adds the stretched block at each tile position with equal-power
-/// (sin/cos) crossfade envelopes, restricted to output frames
-/// `[rangeStart, rangeEnd)`.
+// MARK: - Seam shape
+
+/// How much of a seam's crossfade is equal-power (`1`, sin/cos) versus
+/// equal-gain (`0`, linear), given how correlated the two sides are.
+///
+/// Equal-power keeps the summed POWER flat when the sides are uncorrelated
+/// — a stretched block's tail and head, decorrelated by the phase
+/// randomisation. On correlated material it overshoots: the same pad
+/// crossfading into itself summed to +0.98 dBFS and clipped at every seam
+/// of a tape-slow render. Equal-gain is a convex blend, so it can never
+/// exceed the louder side — but on uncorrelated material it dips 3 dB at
+/// the middle of every seam. Neither is right for both; the blend that
+/// keeps the midpoint at unity power for a given correlation `ρ` is solved
+/// here in closed form (midpoint power `2m²(1 + ρ)` with per-side gain
+/// `m`, so `m = 1 / √(2(1 + ρ))`, mapped between the two shapes' midpoint
+/// gains 0.5 and 1/√2).
+func seamBlend(correlation rho: Double) -> Double {
+    let r = min(max(rho, 0), 1)
+    let m = 1 / (2 * (1 + r)).squareRoot()
+    let w = (m - 0.5) / (0.70710678118654752 - 0.5)
+    return min(max(w, 0), 1)
+}
+
+/// The zero-lag normalised cross-correlation between the last `fadeFrames`
+/// of a block and its first `fadeFrames` — the two sides of every seam when
+/// that block is tiled. `0` for anything too short to have a seam.
+func seamCorrelation(l: [Float], r: [Float], fadeFrames: Int) -> Double {
+    let n = l.count
+    let f = min(fadeFrames, n / 2)
+    guard f > 8 else { return 0 }
+    var dot = 0.0, tail = 0.0, head = 0.0
+    for i in 0..<f {
+        let aL = Double(l[n - f + i]), aR = Double(r[n - f + i])
+        let bL = Double(l[i]), bR = Double(r[i])
+        dot += aL * bL + aR * bR
+        tail += aL * aL + aR * aR
+        head += bL * bL + bR * bR
+    }
+    guard tail > 0, head > 0 else { return 0 }
+    return dot / (tail * head).squareRoot()
+}
+
+/// Overlap-adds the stretched block at each tile position with crossfade
+/// envelopes at every seam — equal-power (sin/cos) at `seamBlend` 1, linear
+/// at 0, blended between (see ``seamBlend(correlation:)``) — restricted to
+/// output frames `[rangeStart, rangeEnd)`.
 ///
 /// `outL`/`outR` are local buffers whose index `0` corresponds to absolute
 /// output frame `rangeStart`; contributions are **added**, so callers zero
@@ -57,8 +100,12 @@ func accumulateTiles(_ tiles: [Tile],
                      rangeEnd: Int,
                      outL: UnsafeMutablePointer<Float>,
                      outR: UnsafeMutablePointer<Float>,
+                     seamBlend w: Double = 1,
                      provider: (Range<Int>, (UnsafePointer<Float>, UnsafePointer<Float>) -> Void) -> Void) {
     let halfPi = Double.pi / 2
+    // `w == 1` takes the original expressions verbatim, so stretched renders
+    // stay bit-identical to what the golden tests pinned.
+    let pure = w == 1
     for tile in tiles {
         let startFrame = Int(tile.start * sr)
         let fadeInDur = tile.fadeInEnd - tile.start
@@ -75,10 +122,15 @@ func accumulateTiles(_ tiles: [Tile],
                 let localT = Double(srcIdx) / sr
                 var g = 1.0
                 if fadeInDur > 0 && localT < fadeInDur {
-                    g = sin((localT / fadeInDur) * halfPi)
+                    if pure {
+                        g = sin((localT / fadeInDur) * halfPi)
+                    } else {
+                        let t = localT / fadeInDur
+                        g = (1 - w) * t + w * sin(t * halfPi)
+                    }
                 } else if fadeOutDur > 0 && localT >= foStartLocal {
                     let fo = min(max((localT - foStartLocal) / fadeOutDur, 0), 1)
-                    g = cos(fo * halfPi)
+                    g = pure ? cos(fo * halfPi) : (1 - w) * (1 - fo) + w * cos(fo * halfPi)
                 }
                 let gf = Float(g)
                 outL[f - rangeStart] += sL[srcIdx - srcLo] * gf
