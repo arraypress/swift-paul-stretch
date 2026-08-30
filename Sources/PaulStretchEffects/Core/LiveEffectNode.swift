@@ -235,6 +235,11 @@ public enum LiveEffectNode {
             }
         }
         guard let node else { return nil }
+        // The macOS 27 SDK re-exports `auAudioUnit` through a Swift overlay that is
+        // `@available(macOS 13, iOS 11, tvOS 11, visionOS 1)`; the older ObjC import
+        // was 10.11. Below the floor the node cannot be handed its chain, and a node
+        // without a chain is silence, so treat it as "could not be created".
+        guard #available(macOS 13.0, iOS 11.0, tvOS 11.0, visionOS 1.0, *) else { return nil }
         (node.auAudioUnit as? LiveEffectAudioUnit)?.chain = chain
         return node
     }
