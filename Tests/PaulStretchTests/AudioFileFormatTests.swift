@@ -10,6 +10,7 @@
 
 import XCTest
 @testable import PaulStretch
+import AVFAudio
 
 final class AudioFileFormatTests: XCTestCase {
 

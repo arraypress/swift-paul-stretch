@@ -11,6 +11,7 @@
 import XCTest
 import PaulStretch
 @testable import PaulStretchEffects
+import AVFAudio
 
 final class PaulStretchEffectsTests: XCTestCase {
 
